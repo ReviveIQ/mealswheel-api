@@ -26,6 +26,21 @@ app.use(express.json());
 let db;
 
 async function connectDB() {
+  // First connect without a database to create it if needed
+  const tempPool = await mysql.createPool({
+    host: process.env.TIDB_HOST,
+    port: parseInt(process.env.TIDB_PORT) || 4000,
+    user: process.env.TIDB_USER,
+    password: process.env.TIDB_PASSWORD,
+    ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' },
+    waitForConnections: true,
+    connectionLimit: 1,
+    connectTimeout: 30000
+  });
+  await tempPool.execute(`CREATE DATABASE IF NOT EXISTS ${process.env.TIDB_DATABASE}`);
+  await tempPool.end();
+
+  // Now connect with the database
   db = await mysql.createPool({
     host: process.env.TIDB_HOST,
     port: parseInt(process.env.TIDB_PORT) || 4000,
@@ -37,7 +52,7 @@ async function connectDB() {
     connectionLimit: 10,
     connectTimeout: 30000
   });
-  console.log('Connected to TiDB');
+  console.log('Connected to TiDB — database:', process.env.TIDB_DATABASE);
 }
 
 // ─── CREATE TABLES ───────────────────────────────────────────────────────────
