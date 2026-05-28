@@ -1,15 +1,19 @@
 {
   "name": "mealswheel-api",
   "version": "1.0.0",
-  "description": "MealsWheel recipe generation API server",
+  "description": "MealsWheel API server — auth, recipes, subscriptions",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
   },
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.6.5",
+    "stripe": "^14.18.0"
   },
   "engines": {
     "node": ">=18.0.0"
