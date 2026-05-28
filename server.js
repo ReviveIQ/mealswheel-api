@@ -32,9 +32,10 @@ async function connectDB() {
     user: process.env.TIDB_USER,
     password: process.env.TIDB_PASSWORD,
     database: process.env.TIDB_DATABASE,
-    ssl: { rejectUnauthorized: true },
+    ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' },
     waitForConnections: true,
-    connectionLimit: 10
+    connectionLimit: 10,
+    connectTimeout: 30000
   });
   console.log('Connected to TiDB');
 }
