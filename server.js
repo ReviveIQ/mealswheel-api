@@ -171,6 +171,14 @@ async function createTables() {
   `);
 
   await db.execute(`
+    CREATE TABLE IF NOT EXISTS recipe_ratings (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      recipe_id INT NOT NULL,
+      stars TINYINT NOT NULL CHECK (stars BETWEEN 1 AND 5),
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_recipe (user_id, recipe_id)
+    );
     CREATE TABLE IF NOT EXISTS family_profiles (
       id INT AUTO_INCREMENT PRIMARY KEY,
       owner_user_id INT NOT NULL,
@@ -391,7 +399,7 @@ app.post('/generate', authMiddleware, async (req, res) => {
       const recipes = parsed.recipes || [];
 
       for (const r of recipes) {
-        await db.execute(
+        const [result] = await db.execute(
           `INSERT INTO recipe_history
            (user_id, recipe_name, emoji, cook_time, difficulty, style,
             calories_per_serving, protein_g, carbs_g, fat_g, ingredients, steps)
@@ -400,6 +408,7 @@ app.post('/generate', authMiddleware, async (req, res) => {
            r.calories_per_serving, r.protein_g, r.carbs_g, r.fat_g,
            JSON.stringify(r.ingredients), JSON.stringify(r.steps)]
         );
+        r._id = result.insertId;
       }
     } catch (parseErr) {
       console.error('Could not save recipe to history:', parseErr.message);
@@ -533,6 +542,44 @@ app.post('/profiles', authMiddleware, async (req, res) => {
     [req.user.userId, name, calorie_goal || 2000, servings || 2]
   );
   res.json({ success: true, id: result.insertId });
+});
+
+// ─── RECIPE RATING ──────────────────────────────────────────────────────────
+app.post('/recipes/:id/rate', authenticateToken, async (req, res) => {
+  const { stars } = req.body;
+  const recipeId = parseInt(req.params.id);
+  if (!stars || stars < 1 || stars > 5) return res.status(400).json({ error: 'stars must be 1-5' });
+  try {
+    const [rows] = await db.execute('SELECT id FROM recipe_history WHERE id=? AND user_id=?', [recipeId, req.user.userId]);
+    if (!rows.length) return res.status(404).json({ error: 'Recipe not found' });
+    await db.execute(
+      'INSERT INTO recipe_ratings (user_id, recipe_id, stars) VALUES (?,?,?) ON DUPLICATE KEY UPDATE stars=?',
+      [req.user.userId, recipeId, stars, stars]
+    );
+    res.json({ success: true, stars });
+  } catch(err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to save rating' });
+  }
+});
+
+app.get('/top-recipes', async (req, res) => {
+  try {
+    const [rows] = await db.execute(`
+      SELECT rh.recipe_name, rh.emoji, rh.style, rh.calories_per_serving,
+             ROUND(AVG(rr.stars),1) as avg_stars, COUNT(rr.id) as rating_count
+      FROM recipe_ratings rr
+      JOIN recipe_history rh ON rh.id = rr.recipe_id
+      WHERE rr.stars >= 4
+      GROUP BY rh.id
+      HAVING rating_count >= 1
+      ORDER BY avg_stars DESC, rating_count DESC
+      LIMIT 6
+    `);
+    res.json(rows);
+  } catch(err) {
+    res.status(500).json({ error: 'Failed to fetch top recipes' });
+  }
 });
 
 // ─── STRIPE PAYMENTS ─────────────────────────────────────────────────────────
