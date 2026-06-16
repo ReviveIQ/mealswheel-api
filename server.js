@@ -178,7 +178,10 @@ async function createTables() {
       stars TINYINT NOT NULL CHECK (stars BETWEEN 1 AND 5),
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY unique_user_recipe (user_id, recipe_id)
-    );
+    )
+  `);
+
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS family_profiles (
       id INT AUTO_INCREMENT PRIMARY KEY,
       owner_user_id INT NOT NULL,
