@@ -422,7 +422,11 @@ app.post('/generate', authMiddleware, async (req, res) => {
       console.error('Could not save recipe to history:', parseErr.message);
     }
 
-    res.json(data);
+    // Return response with _id attached to each recipe so frontend can save favorites/ratings
+    res.json({
+      ...data,
+      content: [{ type: 'text', text: JSON.stringify({ recipes }) }]
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Recipe generation failed' });
