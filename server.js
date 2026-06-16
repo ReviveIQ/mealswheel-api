@@ -13,7 +13,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'mealwheeliq-secret-change-in-produ
 // ─── CORS ────────────────────────────────────────────────────────────────────
 app.use(cors({
   origin: [
-    'https://reviveiq.github.io',
+    'https://reviveiq.github.io', 'https://mealwheeliq.com', 'https://www.mealwheeliq.com',
     'http://localhost:3000',
     'http://127.0.0.1:5500'
   ]
@@ -600,8 +600,8 @@ app.post('/subscribe', authMiddleware, async (req, res) => {
       customer_email: users[0].email,
       line_items: [{ price: prices[plan], quantity: 1 }],
       metadata: { userId: req.user.userId, plan },
-      success_url: 'https://reviveiq.github.io/mealwheeliq?subscribed=true',
-      cancel_url: 'https://reviveiq.github.io/mealwheeliq?cancelled=true'
+      success_url: 'https://mealwheeliq.com?subscribed=true',
+      cancel_url: 'https://mealwheeliq.com?cancelled=true'
     });
     res.json({ url: session.url });
   } catch (err) {
