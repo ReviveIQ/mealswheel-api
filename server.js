@@ -368,6 +368,8 @@ app.post('/generate', authMiddleware, async (req, res) => {
     }
   }
 
+  let recipes = [];
+
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -394,7 +396,6 @@ app.post('/generate', authMiddleware, async (req, res) => {
     try {
       const raw = data.content.map(b => b.text || '').join('');
       let clean = raw.replace(/```json|```/g, '').trim();
-      let recipes = [];
       // Safety net: if JSON is truncated, close any open arrays/objects
       try { JSON.parse(clean); } catch(e) {
         // Attempt to recover by closing open structures
@@ -437,10 +438,11 @@ app.post('/generate', authMiddleware, async (req, res) => {
 // ─── RECIPE HISTORY ──────────────────────────────────────────────────────────
 app.get('/history', authMiddleware, async (req, res) => {
   const plan = await getUserPlan(req.user.userId);
-  const limit = plan === 'free' ? 0 : 1000; // free gets no history
+  // Free users get no history — return empty array
+  if (plan === 'free') return res.json([]);
   const [rows] = await db.execute(
-    'SELECT * FROM recipe_history WHERE user_id = ? ORDER BY spun_at DESC LIMIT ?',
-    [req.user.userId, limit]
+    'SELECT * FROM recipe_history WHERE user_id = ? ORDER BY spun_at DESC LIMIT 1000',
+    [req.user.userId]
   );
   res.json(rows.map(r => ({
     ...r,
