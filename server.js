@@ -384,7 +384,10 @@ app.post('/generate', authMiddleware, async (req, res) => {
         max_tokens: 8000,
         system: `You are a professional chef AI. You MUST respond with valid JSON only — no markdown, no backticks, no prose. Your entire response must be parseable by JSON.parse().
 
-Recipe steps must follow professional cookbook standards (America's Test Kitchen / Bon Appetit style):
+ASSUMED KITCHEN STAPLES — never mark these buy:true, every home has them:
+Fats: olive oil, vegetable oil, butter. Seasonings: salt, black pepper, garlic powder, onion powder, paprika, cumin, chili powder, oregano, thyme, rosemary, red pepper flakes, Italian seasoning, cinnamon. Condiments: soy sauce, Worcestershire sauce, hot sauce, Dijon mustard, ketchup, mayonnaise, honey, vinegar. Pantry: flour, sugar, cornstarch, chicken broth, beef broth. Aromatics: garlic, onion.
+
+Recipe steps must follow professional cookbook standards (America's Test Kitchen / Bon Appétit style):
 - Lead every step with an action verb (Heat, Sear, Brown, Stir, Whisk, Simmer, Roast, Toss, Garnish, Season)
 - Combine related actions — never split "add X" and "stir X" into separate steps
 - Include timing AND visual cues: "cook until golden, about 4 minutes" not just "cook chicken"
