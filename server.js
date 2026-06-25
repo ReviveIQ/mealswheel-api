@@ -205,6 +205,13 @@ async function createTables() {
   console.log('All tables created');
 }
 
+// Safe JSON parse — handles already-parsed objects (TiDB returns parsed JSON)
+function safeJsonParse(val, fallback = []) {
+  if (!val) return fallback;
+  if (typeof val === 'object') return val; // already parsed by TiDB
+  try { return JSON.parse(val); } catch { return fallback; }
+}
+
 // ─── AUTH MIDDLEWARE ─────────────────────────────────────────────────────────
 function authMiddleware(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
@@ -319,7 +326,7 @@ app.get('/preferences', authMiddleware, async (req, res) => {
   res.json({
     daily_calorie_goal: r.daily_calorie_goal,
     servings: r.servings,
-    dietary_preferences: JSON.parse(r.dietary_preferences || '[]'),
+    dietary_preferences: safeJsonParse(r.dietary_preferences, []),
     chef_name: r.chef_name || 'Chef'
   });
 });
@@ -474,8 +481,8 @@ app.get('/history', authMiddleware, async (req, res) => {
   );
   res.json(rows.map(r => ({
     ...r,
-    ingredients: JSON.parse(r.ingredients || '[]'),
-    steps: JSON.parse(r.steps || '[]')
+    ingredients: safeJsonParse(r.ingredients),
+    steps: safeJsonParse(r.steps)
   })));
 });
 
@@ -497,8 +504,8 @@ app.get('/favorites', authMiddleware, async (req, res) => {
   );
   res.json(rows.map(r => ({
     ...r,
-    ingredients: JSON.parse(r.ingredients || '[]'),
-    steps: JSON.parse(r.steps || '[]')
+    ingredients: safeJsonParse(r.ingredients),
+    steps: safeJsonParse(r.steps)
   })));
 });
 
