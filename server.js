@@ -202,7 +202,7 @@ async function createTables() {
     // Column already exists — safe to ignore
   }
 
-  console.log('All tables created');
+  console.log('All tables created'); // deploy-trigger-1782838635
 }
 
 // Safe JSON parse — handles already-parsed objects (TiDB returns parsed JSON)
