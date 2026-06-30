@@ -367,6 +367,59 @@ app.post('/pantry', authMiddleware, async (req, res) => {
   res.json({ success: true });
 });
 
+// ─── PANTRY PHOTO SCAN ───────────────────────────────────────────────────────
+app.post('/pantry/scan', authMiddleware, async (req, res) => {
+  const { image, mediaType } = req.body; // base64 image data, e.g. image/jpeg
+  if (!image) return res.status(400).json({ error: 'No image provided' });
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1024,
+        system: 'You are a kitchen inventory assistant. Identify food and ingredient items visible in the photo. Respond ONLY with valid JSON, no markdown, no prose.',
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: image }
+            },
+            {
+              type: 'text',
+              text: 'Identify every distinct food/ingredient item visible in this photo (fridge, pantry, or freezer). Use common grocery names (e.g. "Chicken Breast" not "raw poultry"). Skip non-food items, packaging-only views, and items you cannot confidently identify. Respond ONLY with valid JSON: {"items":["Chicken Breast","Broccoli","Cheddar Cheese"]}'
+            }
+          ]
+        }]
+      })
+    });
+
+    const data = await response.json();
+    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || 'Vision API error' });
+
+    const raw = data.content?.map(b => b.text || '').join('') || '{}';
+    const clean = raw.replace(/```json|```/g, '').trim();
+    let items = [];
+    try {
+      const parsed = JSON.parse(clean);
+      items = parsed.items || [];
+    } catch(e) {
+      console.error('Pantry scan parse error:', e.message);
+    }
+
+    res.json({ items });
+  } catch (err) {
+    console.error('Pantry scan error:', err);
+    res.status(500).json({ error: 'Pantry scan failed' });
+  }
+});
+
 // ─── RECIPE GENERATION ───────────────────────────────────────────────────────
 app.post('/generate', authMiddleware, async (req, res) => {
   const { prompt } = req.body;
