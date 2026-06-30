@@ -602,8 +602,8 @@ app.get('/mealplans', authMiddleware, async (req, res) => {
     );
     plan.items = items.map(r => ({
       ...r,
-      ingredients: JSON.parse(r.ingredients || '[]'),
-      steps: JSON.parse(r.steps || '[]')
+      ingredients: typeof r.ingredients === 'string' ? JSON.parse(r.ingredients || '[]') : (r.ingredients || []),
+      steps: typeof r.steps === 'string' ? JSON.parse(r.steps || '[]') : (r.steps || [])
     }));
   }
   res.json(plans);
