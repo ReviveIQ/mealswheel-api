@@ -823,57 +823,99 @@ app.post('/quickspin/checkout', async (req, res) => {
   }
 });
 
-// POST /quickspin/scan — public pantry scan, no auth required
-app.post('/quickspin/scan', async (req, res) => {
-  const { image, mediaType } = req.body;
-  if (!image) return res.status(400).json({ error: 'No image provided' });
+// POST /quickspin/preview — generate preview for FREE before payment
+// Results are cached by preview token and unlocked after Stripe payment
+const previewCache = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 2 * 60 * 60 * 1000; // 2hr expiry
+  for (const [k, v] of previewCache) {
+    if (v.createdAt < cutoff) previewCache.delete(k);
+  }
+}, 30 * 60 * 1000);
+
+app.post('/quickspin/preview', async (req, res) => {
+  const { mode, ingredients, craving } = req.body;
+  if (!mode) return res.status(400).json({ error: 'Mode required' });
+
+  const ingList = (ingredients || []).join(', ') || 'common household ingredients';
+  const cravingLine = craving ? `
+The user is craving: "${craving}" — incorporate this.` : '';
+  const STAPLES = 'olive oil, vegetable oil, butter, salt, black pepper, garlic powder, onion powder, all common spices, soy sauce, Worcestershire, hot sauce, mustard, ketchup, mayo, honey, vinegar, flour, sugar, garlic, onion';
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
   try {
-    const Anthropic = require('@anthropic-ai/sdk');
-    const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+    let recipes = [];
 
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1000,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: 'image',
-            source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: image }
-          },
-          {
-            type: 'text',
-            text: `Look at this photo of a fridge or pantry. List every food ingredient you can identify.
-Do NOT include: condiments, spices, sauces, oils, or beverages unless they are clearly a main cooking ingredient.
-Do NOT include: non-food items, packaging you cannot read, or unclear items.
-Return ONLY a JSON array of ingredient names, concise and clean.
-Example: ["chicken breast", "broccoli", "eggs", "sweet potatoes", "ground turkey"]
-Respond with ONLY the JSON array, nothing else.`
-          }
-        ]
-      }]
-    });
+    if (mode === 'tonight') {
+      const prompt = `You are a professional chef. Generate 1 delicious dinner recipe.${cravingLine}
+Available ingredients: ${ingList}
+ASSUMED STAPLES (never mark buy:true): ${STAPLES}
+Suggest 3-5 ingredients to buy (buy:true). Flag organic:true for meats, eggs, leafy greens.
+Servings: 2. Target ~600 kcal/serving.
+Respond ONLY with valid JSON: {"recipes":[{"name":"Name","emoji":"🍽️","time":"30 min","difficulty":"Easy","style":"American","calories_per_serving":600,"protein_g":35,"carbs_g":50,"fat_g":20,"ingredients":[{"name":"item","organic":false,"buy":false}],"steps":["Step 1."]}]}`;
 
-    const raw = message.content.map(b => b.text || '').join('').trim();
-    const items = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      const msg = await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] });
+      const parsed = JSON.parse(msg.content.map(b=>b.text||'').join('').replace(/```json|```/g,'').trim());
+      recipes = parsed.recipes || [];
 
-    if (!Array.isArray(items)) throw new Error('Invalid response format');
-    res.json({ items: items.slice(0, 40) });
+    } else {
+      const dayStyles = [
+        { day: 'Monday', style: 'bold American comfort food or BBQ-inspired' },
+        { day: 'Tuesday', style: 'fresh Mediterranean or Italian' },
+        { day: 'Wednesday', style: 'LIGHT & FRESH — big chopped salad, grain bowl, or wrap. Homemade dressing with exact measurements.' },
+        { day: 'Thursday', style: 'bold Asian-inspired stir fry, Thai, or Korean BBQ' },
+        { day: 'Friday', style: 'creative wildcard — something unexpected and fun' }
+      ];
+      const avoidNames = [];
+      for (const { day, style } of dayStyles) {
+        const avoidStr = avoidNames.length ? `Do NOT repeat: ${avoidNames.join(', ')}.` : '';
+        const prompt = `You are a professional chef. Generate 1 dinner recipe for ${day}.
+STYLE: ${style}${cravingLine}
+Available ingredients: ${ingList}
+ASSUMED STAPLES (never mark buy:true): ${STAPLES}
+${avoidStr}
+Suggest 3-5 fresh ingredients to buy (buy:true). Flag organic:true for meats, eggs, leafy greens.
+Servings: 2. Target ~650 kcal/serving.
+Respond ONLY with valid JSON: {"recipes":[{"name":"Name","emoji":"🍽️","time":"35 min","difficulty":"Easy","style":"${day}","calories_per_serving":650,"protein_g":38,"carbs_g":55,"fat_g":22,"ingredients":[{"name":"item","organic":false,"buy":false}],"steps":["Step 1."]}]}`;
+        const msg = await anthropic.messages.create({ model: 'claude-sonnet-4-6', max_tokens: 2000, messages: [{ role: 'user', content: prompt }] });
+        const parsed = JSON.parse(msg.content.map(b=>b.text||'').join('').replace(/```json|```/g,'').trim());
+        if (parsed.recipes?.[0]) {
+          recipes.push({ ...parsed.recipes[0], day });
+          avoidNames.push(parsed.recipes[0].name);
+        }
+      }
+    }
+
+    // Cache preview
+    const previewToken = crypto.randomBytes(16).toString('hex');
+    previewCache.set(previewToken, { mode, recipes, createdAt: Date.now() });
+    res.json({ mode, recipes, previewToken });
 
   } catch(e) {
-    console.error('QuickSpin scan error:', e);
-    res.status(400).json({ error: 'Could not process image. Please try a clearer photo or type your ingredients.' });
+    console.error('Preview error:', e);
+    res.status(500).json({ error: 'Preview generation failed' });
   }
 });
 
 // POST /quickspin/generate — generate recipe(s) for paid session
 app.post('/quickspin/generate', async (req, res) => {
-  const { token, ingredients, craving } = req.body;
+  const { token, ingredients, craving, previewToken } = req.body;
   const session = quickspinSessions.get(token);
   if (!session) return res.status(404).json({ error: 'Session not found or expired' });
   if (!session.paid) return res.status(402).json({ error: 'Payment required' });
   if (session.generated) return res.status(200).json(session.result); // return cached result
+
+  // If we have a cached preview, use it instead of regenerating
+  if (previewToken && previewCache.has(previewToken)) {
+    const preview = previewCache.get(previewToken);
+    session.generated = true;
+    session.result = { mode: preview.mode, recipes: preview.recipes };
+    quickspinSessions.set(token, session);
+    previewCache.delete(previewToken);
+    return res.json(session.result);
+  }
 
   const { mode } = session;
   const ingList = (ingredients || []).join(', ') || 'common household ingredients';
