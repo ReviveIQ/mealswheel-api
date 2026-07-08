@@ -760,8 +760,372 @@ app.post('/webhook', async (req, res) => {
     );
   }
 
+  // QuickSpin one-time payment
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object;
+    const quickspinToken = session.metadata?.quickspinToken;
+    if (quickspinToken && quickspinSessions.has(quickspinToken)) {
+      const qs = quickspinSessions.get(quickspinToken);
+      qs.paid = true;
+      quickspinSessions.set(quickspinToken, qs);
+      console.log('QuickSpin payment confirmed:', quickspinToken);
+    }
+  }
+
   res.json({ received: true });
 });
+
+
+// ─── QUICKSPIN — ONE-TIME PURCHASE ───────────────────────────────────────────
+
+const { Resend } = (() => {
+  try { return require('resend'); } catch(e) { return { Resend: null }; }
+})();
+const resend = Resend && process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+const crypto = require('crypto');
+
+// In-memory store for quickspin sessions (no DB needed — expires after 24h)
+const quickspinSessions = new Map();
+setInterval(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [k, v] of quickspinSessions) {
+    if (v.createdAt < cutoff) quickspinSessions.delete(k);
+  }
+}, 60 * 60 * 1000);
+
+// POST /quickspin/checkout — create Stripe checkout session
+app.post('/quickspin/checkout', async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: 'Payments not configured' });
+  const { mode, contact, contactType } = req.body; // mode: 'tonight' or 'week'
+  if (!mode || !contact || !contactType) return res.status(400).json({ error: 'Missing required fields' });
+
+  const priceId = process.env.STRIPE_QUICKSPIN_PRICE_ID;
+  if (!priceId) return res.status(503).json({ error: 'QuickSpin price not configured' });
+
+  // Generate a session token to pass through Stripe metadata
+  const token = crypto.randomBytes(32).toString('hex');
+  quickspinSessions.set(token, { mode, contact, contactType, paid: false, createdAt: Date.now() });
+
+  try {
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
+      mode: 'payment',
+      line_items: [{ price: priceId, quantity: 1 }],
+      metadata: { quickspinToken: token, mode, contact, contactType },
+      customer_email: contactType === 'email' ? contact : undefined,
+      success_url: `https://mealwheeliq.com/quickspin.html?token=${token}&success=true`,
+      cancel_url: 'https://mealwheeliq.com/quickspin.html?cancelled=true'
+    });
+    res.json({ url: session.url });
+  } catch (err) {
+    console.error('QuickSpin checkout error:', err);
+    res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
+
+// POST /quickspin/generate — generate recipe(s) for paid session
+app.post('/quickspin/generate', async (req, res) => {
+  const { token, ingredients, craving } = req.body;
+  const session = quickspinSessions.get(token);
+  if (!session) return res.status(404).json({ error: 'Session not found or expired' });
+  if (!session.paid) return res.status(402).json({ error: 'Payment required' });
+  if (session.generated) return res.status(200).json(session.result); // return cached result
+
+  const { mode } = session;
+  const ingList = (ingredients || []).join(', ') || 'common household ingredients';
+  const cravingLine = craving ? `\nThe user is craving: "${craving}" — incorporate this.` : '';
+
+  const STAPLES = 'olive oil, vegetable oil, butter, salt, black pepper, garlic powder, onion powder, all common spices, soy sauce, Worcestershire, hot sauce, mustard, ketchup, mayo, honey, vinegar, flour, sugar, garlic, onion';
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  try {
+    let result;
+    if (mode === 'tonight') {
+      const prompt = `You are a professional chef. Generate 1 delicious dinner recipe.${cravingLine}
+Available ingredients: ${ingList}
+ASSUMED STAPLES (never mark buy:true): ${STAPLES}
+Suggest 2-4 ingredients to buy (buy:true). Flag organic:true for meats, eggs, leafy greens.
+Servings: 2. Target ~600 kcal/serving.
+Respond ONLY with valid JSON: {"recipes":[{"name":"Name","emoji":"🍽️","time":"30 min","difficulty":"Easy","style":"American","calories_per_serving":600,"protein_g":35,"carbs_g":50,"fat_g":20,"ingredients":[{"name":"item","organic":false,"buy":false}],"steps":["Step 1."]}]}`;
+
+      const message = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2000,
+        messages: [{ role: 'user', content: prompt }]
+      });
+      const raw = message.content.map(b => b.text || '').join('');
+      const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+      result = { mode: 'tonight', recipes: parsed.recipes };
+
+    } else {
+      // Week mode — generate all 5 nights
+      const dayStyles = [
+        { day: 'Monday', style: 'bold American comfort food or BBQ-inspired (burgers, ribs, mac & cheese)' },
+        { day: 'Tuesday', style: 'fresh Mediterranean or Italian (pasta, fish, antipasto)' },
+        { day: 'Wednesday', style: 'LIGHT & FRESH — big chopped salad, grain bowl, or wrap. No-cook or minimal cook. Homemade dressing with exact measurements.' },
+        { day: 'Thursday', style: 'bold Asian-inspired (stir fry, Thai peanut noodles, teriyaki, Korean BBQ)' },
+        { day: 'Friday', style: 'CREATIVE WILDCARD — something unexpected and fun the family will love' }
+      ];
+
+      const recipes = [];
+      const avoidNames = [];
+      for (const { day, style } of dayStyles) {
+        const avoidStr = avoidNames.length ? `Do NOT repeat: ${avoidNames.join(', ')}.` : '';
+        const prompt = `You are a professional chef. Generate 1 dinner recipe for ${day}.
+STYLE: ${style}${cravingLine}
+Available ingredients: ${ingList}
+ASSUMED STAPLES (never mark buy:true): ${STAPLES}
+${avoidStr}
+Suggest 3-5 fresh ingredients to buy (buy:true). Flag organic:true for meats, eggs, leafy greens.
+Servings: 2. Target ~650 kcal/serving.
+Respond ONLY with valid JSON: {"recipes":[{"name":"Name","emoji":"🍽️","time":"35 min","difficulty":"Easy","style":"${day}","calories_per_serving":650,"protein_g":38,"carbs_g":55,"fat_g":22,"ingredients":[{"name":"item","organic":false,"buy":false}],"steps":["Step 1."]}]}`;
+
+        const message = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 2000,
+          messages: [{ role: 'user', content: prompt }]
+        });
+        const raw = message.content.map(b => b.text || '').join('');
+        const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+        if (parsed.recipes?.[0]) {
+          recipes.push({ ...parsed.recipes[0], day });
+          avoidNames.push(parsed.recipes[0].name);
+        }
+      }
+      result = { mode: 'week', recipes };
+    }
+
+    session.generated = true;
+    session.result = result;
+    quickspinSessions.set(token, session);
+    res.json(result);
+  } catch (err) {
+    console.error('QuickSpin generate error:', err);
+    res.status(500).json({ error: 'Generation failed — please try again' });
+  }
+});
+
+// POST /quickspin/mixup — swap one recipe (limited to 1 use per session)
+app.post('/quickspin/mixup', async (req, res) => {
+  const { token, dayIndex, ingredients, craving } = req.body;
+  const session = quickspinSessions.get(token);
+  if (!session || !session.paid) return res.status(402).json({ error: 'Invalid session' });
+  if (session.mixupUsed) return res.status(403).json({ error: 'Mix up already used for this purchase' });
+
+  const ingList = (ingredients || []).join(', ') || 'common household ingredients';
+  const STAPLES = 'olive oil, vegetable oil, butter, salt, black pepper, garlic powder, onion powder, all common spices, soy sauce, Worcestershire, hot sauce, mustard, ketchup, mayo, honey, vinegar, flour, sugar, garlic, onion';
+  const ALL_STYLES = ['Bold American / BBQ','Mediterranean / Italian','Light & Fresh bowl or salad','Asian-inspired stir fry or noodles','Mexican or Latin-American','Creative wildcard','Japanese-inspired','Slow & cozy stew or soup','Seafood night','Steakhouse at home','Fun family night (pizza, tacos bar, sliders)'];
+  const currentNames = session.result?.recipes?.map(r => r.name) || [];
+  const randomStyle = ALL_STYLES[Math.floor(Math.random() * ALL_STYLES.length)];
+  const avoidStr = currentNames.length ? `Do NOT repeat any of: ${currentNames.join(', ')}.` : '';
+  const dayName = ['Monday','Tuesday','Wednesday','Thursday','Friday'][dayIndex] || 'tonight';
+  const cravingLine = craving ? `\nUser is craving: "${craving}".` : '';
+
+  const Anthropic = require('@anthropic-ai/sdk');
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  try {
+    const prompt = `You are a professional chef. Generate 1 dinner recipe for ${dayName}.
+STYLE: ${randomStyle}${cravingLine}
+Available ingredients: ${ingList}
+ASSUMED STAPLES (never mark buy:true): ${STAPLES}
+${avoidStr}
+Suggest 3-5 ingredients to buy (buy:true). Flag organic:true for meats, eggs, leafy greens.
+Servings: 2. Target ~650 kcal/serving.
+Respond ONLY with valid JSON: {"recipes":[{"name":"Name","emoji":"🍽️","time":"35 min","difficulty":"Easy","style":"${randomStyle}","calories_per_serving":650,"protein_g":38,"carbs_g":55,"fat_g":22,"ingredients":[{"name":"item","organic":false,"buy":false}],"steps":["Step 1."]}]}`;
+
+    const message = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2000,
+      messages: [{ role: 'user', content: prompt }]
+    });
+    const raw = message.content.map(b => b.text || '').join('');
+    const parsed = JSON.parse(raw.replace(/```json|```/g, '').trim());
+    const newRecipe = parsed.recipes?.[0];
+    if (!newRecipe) throw new Error('No recipe returned');
+
+    // Update session
+    if (session.result?.recipes && dayIndex !== undefined) {
+      session.result.recipes[dayIndex] = { ...newRecipe, day: dayName };
+    } else if (session.result?.recipes) {
+      session.result.recipes.push(newRecipe);
+    }
+    session.mixupUsed = true;
+    quickspinSessions.set(token, session);
+
+    res.json({ recipe: newRecipe, mixupUsed: true });
+  } catch (err) {
+    console.error('QuickSpin mixup error:', err);
+    res.status(500).json({ error: 'Mix up failed — please try again' });
+  }
+});
+
+// POST /quickspin/email — send results via Resend
+app.post('/quickspin/email', async (req, res) => {
+  const { token } = req.body;
+  const session = quickspinSessions.get(token);
+  if (!session || !session.paid) return res.status(402).json({ error: 'Invalid session' });
+  if (session.emailSent) return res.status(200).json({ sent: true, cached: true });
+
+  const { mode, contact, contactType, result } = session;
+  if (!result) return res.status(400).json({ error: 'No results to send yet' });
+  if (contactType !== 'email') return res.status(200).json({ sent: false, reason: 'SMS not yet supported' });
+  if (!resend) return res.status(503).json({ error: 'Email not configured' });
+
+  const recipes = result.recipes || [];
+  const isWeek = mode === 'week';
+
+  // Build grocery list
+  const ingMap = {};
+  const PROT = ['beef','chicken','pork','salmon','shrimp','sausage','bacon','egg','fish','turkey','lamb','steak','ground','tofu'];
+  const PROD = ['potato','carrot','squash','pepper','spinach','broccoli','lemon','lime','avocado','tomato','mushroom','kale','cucumber','herbs','cilantro','basil','ginger'];
+  const DAIRY = ['cheese','butter','cream','milk','yogurt','mozzarella','feta'];
+  recipes.forEach((r, di) => {
+    (r.ingredients || []).filter(i => i.buy).forEach(ing => {
+      const k = ing.name.toLowerCase();
+      if (!ingMap[k]) ingMap[k] = { name: ing.name, organic: ing.organic, days: [] };
+      if (isWeek) ingMap[k].days.push(r.day || `Night ${di+1}`);
+    });
+  });
+  const cats = { 'Proteins': [], 'Produce': [], 'Dairy': [], 'Pantry & Other': [] };
+  Object.values(ingMap).forEach(ing => {
+    const k = ing.name.toLowerCase();
+    if (PROT.some(p => k.includes(p))) cats['Proteins'].push(ing);
+    else if (PROD.some(p => k.includes(p))) cats['Produce'].push(ing);
+    else if (DAIRY.some(p => k.includes(p))) cats['Dairy'].push(ing);
+    else cats['Pantry & Other'].push(ing);
+  });
+
+  const today = new Date();
+  const daysUntilSunday = (7 - today.getDay()) % 7 || 7;
+  const buyBy = new Date(today.getTime() + daysUntilSunday * 86400000);
+  const buyByStr = buyBy.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+
+  // Build HTML email
+  const groceryHTML = Object.entries(cats).filter(([,items]) => items.length).map(([cat, items]) => `
+    <div style="margin-bottom:16px">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#8C7B72;margin-bottom:8px">${cat}</div>
+      ${items.map(i => `
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #EAE5DF">
+          <span style="font-size:14px;color:#1C1714">${i.organic ? '🌿 ' : ''}${i.name}</span>
+          ${isWeek && i.days.length ? `<span style="font-size:11px;color:#8C7B72;background:#FAF8F5;padding:2px 8px;border-radius:10px">${i.days.join(', ')}</span>` : ''}
+        </div>`).join('')}
+    </div>`).join('');
+
+  const recipesHTML = recipes.map((r, i) => `
+    <div style="background:#FFFFFF;border:1px solid #EAE5DF;border-radius:16px;padding:24px;margin-bottom:20px">
+      ${isWeek ? `<div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#C94B2A;margin-bottom:6px">${r.day || ''}</div>` : ''}
+      <div style="font-size:24px;margin-bottom:4px">${r.emoji || '🍽️'}</div>
+      <h2 style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:#1C1714;margin:0 0 8px">${r.name}</h2>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+        <span style="background:#FAF8F5;border:1px solid #EAE5DF;border-radius:20px;padding:4px 12px;font-size:12px;color:#4A3F38">⏱ ${r.time}</span>
+        <span style="background:#FAF8F5;border:1px solid #EAE5DF;border-radius:20px;padding:4px 12px;font-size:12px;color:#4A3F38">${r.difficulty}</span>
+        <span style="background:#EAF3EE;border-radius:20px;padding:4px 12px;font-size:12px;color:#2A6B4A">🔥 ${r.calories_per_serving} kcal</span>
+        <span style="background:#EAF3EE;border-radius:20px;padding:4px 12px;font-size:12px;color:#2A6B4A">💪 ${r.protein_g}g protein</span>
+      </div>
+      <h3 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#8C7B72;margin:0 0 10px">Ingredients</h3>
+      <ul style="padding-left:18px;margin:0 0 20px">
+        ${(r.ingredients || []).map(ing => `<li style="font-size:14px;color:#4A3F38;margin-bottom:4px;padding-left:4px">
+          ${ing.organic ? '<span style="color:#2A6B4A">🌿 </span>' : ''}
+          <strong style="color:${ing.buy ? '#C94B2A' : '#1C1714'}">${ing.name}</strong>
+          ${ing.buy ? ' <span style="font-size:11px;color:#C94B2A;background:#FAF0EB;padding:1px 6px;border-radius:8px">buy</span>' : ''}
+        </li>`).join('')}
+      </ul>
+      <h3 style="font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#8C7B72;margin:0 0 10px">Instructions</h3>
+      <ol style="padding-left:18px;margin:0">
+        ${(r.steps || []).map(step => `<li style="font-size:14px;color:#4A3F38;margin-bottom:8px;line-height:1.6">${step}</li>`).join('')}
+      </ol>
+    </div>`).join('');
+
+  const subject = isWeek
+    ? `🍽️ Your 5-night meal plan is ready — MealWheelIQ`
+    : `🍽️ Tonight's dinner recipe from MealWheelIQ`;
+
+  const html = `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#FAF8F5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif">
+<div style="max-width:600px;margin:0 auto;padding:24px 16px">
+  <div style="text-align:center;padding:32px 0 24px">
+    <div style="font-family:Georgia,serif;font-size:28px;font-weight:700;color:#1C1714">MealWheel<span style="color:#C94B2A">IQ</span></div>
+    <div style="font-size:13px;color:#8C7B72;margin-top:4px">Spin it. Cook it. Love it.</div>
+  </div>
+
+  <div style="background:#C94B2A;border-radius:16px;padding:24px;text-align:center;margin-bottom:24px">
+    <div style="font-size:32px;margin-bottom:8px">${isWeek ? '📅' : '🍽️'}</div>
+    <div style="font-family:Georgia,serif;font-size:22px;font-weight:700;color:white;margin-bottom:6px">
+      ${isWeek ? 'Your week is planned!' : "Tonight's dinner is ready!"}
+    </div>
+    <div style="font-size:14px;color:rgba(255,255,255,.8)">
+      ${isWeek ? `${recipes.length} dinners · complete grocery list · step-by-step instructions` : `Full recipe · ingredients · step-by-step instructions`}
+    </div>
+  </div>
+
+  ${isWeek ? `
+  <div style="background:white;border:1px solid #EAE5DF;border-radius:16px;padding:20px;margin-bottom:24px">
+    <h2 style="font-size:16px;font-weight:700;color:#1C1714;margin:0 0 16px">🛒 Weekly Grocery List</h2>
+    <div style="background:#EAF3EE;border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:13px;color:#2A6B4A">
+      📅 Buy by <strong>${buyByStr}</strong> — ${Object.keys(ingMap).length} items needed
+    </div>
+    ${groceryHTML}
+  </div>` : ''}
+
+  <h2 style="font-family:Georgia,serif;font-size:20px;font-weight:700;color:#1C1714;margin:0 0 16px">
+    ${isWeek ? '🍽️ Your 5 Recipes' : '🍽️ Your Recipe'}
+  </h2>
+  ${recipesHTML}
+
+  ${!isWeek ? `
+  <div style="background:white;border:1px solid #EAE5DF;border-radius:16px;padding:20px;margin-bottom:24px">
+    <h2 style="font-size:16px;font-weight:700;color:#1C1714;margin:0 0 12px">🛒 What to Buy</h2>
+    ${groceryHTML}
+  </div>` : ''}
+
+  <div style="background:#1C1714;border-radius:16px;padding:28px;text-align:center;margin-bottom:24px">
+    <div style="font-family:Georgia,serif;font-size:20px;color:white;margin-bottom:8px">Love your ${isWeek ? 'meal plan' : 'recipe'}?</div>
+    <div style="font-size:13px;color:rgba(255,255,255,.65);margin-bottom:20px">Get unlimited spins, week planning, soup creator, and your pantry always ready — for less than one takeout order a month.</div>
+    <a href="https://mealwheeliq.com/login.html" style="background:#C94B2A;color:white;text-decoration:none;border-radius:24px;padding:12px 28px;font-size:14px;font-weight:700;display:inline-block">Get unlimited spins — $4.99/mo →</a>
+  </div>
+
+  <div style="text-align:center;font-size:12px;color:#8C7B72;padding-bottom:24px">
+    MealWheelIQ · Spin it. Cook it. Love it.<br>
+    <a href="https://mealwheeliq.com" style="color:#C94B2A;text-decoration:none">mealwheeliq.com</a>
+  </div>
+</div>
+</body></html>`;
+
+  try {
+    await resend.emails.send({
+      from: process.env.RESEND_FROM || 'chef@mealwheeliq.com',
+      to: contact,
+      subject,
+      html
+    });
+    session.emailSent = true;
+    quickspinSessions.set(token, session);
+    res.json({ sent: true });
+  } catch (err) {
+    console.error('Resend error:', err);
+    res.status(500).json({ error: 'Failed to send email' });
+  }
+});
+
+// GET /quickspin/session/:token — check session status
+app.get('/quickspin/session/:token', (req, res) => {
+  const session = quickspinSessions.get(req.params.token);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+  res.json({
+    paid: session.paid,
+    mode: session.mode,
+    generated: !!session.generated,
+    mixupUsed: !!session.mixupUsed,
+    emailSent: !!session.emailSent
+  });
+});
+
+// Webhook handler — add quickspin payment handling
+// (inserted into existing webhook handler via code)
 
 // ─── START ───────────────────────────────────────────────────────────────────
 async function startWithRetry(retries = 5, delayMs = 5000) {
