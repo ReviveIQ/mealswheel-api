@@ -816,34 +816,17 @@ app.post('/recipe/:id/generate-image', authMiddleware, async (req, res) => {
 
     const prompt = `Professional food photography of ${r.recipe_name}, ${r.style || 'home-cooked'} style. Overhead shot on a rustic wooden table, natural window lighting, beautifully plated and garnished, appetizing and magazine-quality. No text, no watermarks, photorealistic.`;
 
-    // Try gpt-image-1 first (returns base64), fall back to dall-e-2 (returns URL)
-    let imageBase64 = null;
-    let imageTempUrl = null;
-    try {
-      const resp1 = await openai.images.generate({
-        model: 'gpt-image-1',
-        prompt,
-        n: 1,
-        size: '1024x1024',
-        quality: 'medium',
-        response_format: 'b64_json'
-      });
-      imageBase64 = resp1.data[0].b64_json;
-      console.log('Image generated with gpt-image-1');
-    } catch(e) {
-      console.log('gpt-image-1 unavailable, trying dall-e-2:', e.message);
-      const resp2 = await openai.images.generate({
-        model: 'dall-e-2',
-        prompt,
-        n: 1,
-        size: '1024x1024',
-        response_format: 'b64_json'
-      });
-      imageBase64 = resp2.data[0].b64_json;
-      console.log('Image generated with dall-e-2');
-    }
+    // gpt-image-2 — simplest params, returns URL
+    const imgResp = await openai.images.generate({
+      model: 'gpt-image-2',
+      prompt,
+      n: 1,
+      size: '1024x1024'
+    });
+    const imageTempUrl = imgResp.data[0].url;
+    console.log('Image generated with gpt-image-2:', !!imageTempUrl);
 
-    // Store image permanently in GitHub Pages immediately (avoids expiry issues)
+    // Store image permanently in GitHub Pages (avoids URL expiry)
     const https = require('https');
     const ghToken = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT;
     let imageUrl = null;
