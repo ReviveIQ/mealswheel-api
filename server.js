@@ -896,12 +896,17 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
   <meta name="twitter:description" content="${desc}">
   <meta name="twitter:image" content="${finalImgUrl}">
   <link rel="canonical" href="${pageUrl}">
-  <meta http-equiv="refresh" content="0;url=${pageUrl}">
+  <!-- real users click the link below; no redirect so Facebook reads these OG tags -->
 </head>
-<body>
+<body style="font-family:sans-serif;max-width:600px;margin:2rem auto;padding:1rem;text-align:center">
   <h1>${r.recipe_name}</h1>
-  <p>${desc}</p>
-  <p><a href="${pageUrl}">View full recipe on MealWheelIQ</a></p>
+  <p style="color:#666;margin:1rem 0">${desc}</p>
+  <a href="${pageUrl}" style="background:#C94B2A;color:white;padding:.75rem 2rem;border-radius:24px;text-decoration:none;font-weight:700;display:inline-block;margin-top:1rem">
+    View full recipe on MealWheelIQ →
+  </a>
+  <p style="color:#999;font-size:12px;margin-top:2rem">
+    <a href="https://mealwheeliq.com" style="color:#C94B2A">MealWheelIQ</a> — Spin it. Cook it. Love it.
+  </p>
 </body>
 </html>`;
 
