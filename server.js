@@ -816,15 +816,22 @@ app.post('/recipe/:id/generate-image', authMiddleware, async (req, res) => {
 
     const prompt = `Professional food photography of ${r.recipe_name}, ${r.style || 'home-cooked'} style. Overhead shot on a rustic wooden table, natural window lighting, beautifully plated and garnished, appetizing and magazine-quality. No text, no watermarks, photorealistic.`;
 
-    // gpt-image-2 — simplest params, returns URL
-    const imgResp = await openai.images.generate({
-      model: 'gpt-image-2',
-      prompt,
-      n: 1,
-      size: '1024x1024'
+    // gpt-image-2 with 15 second timeout — fail fast if unavailable
+    const imageTempUrl = await Promise.race([
+      openai.images.generate({
+        model: 'gpt-image-2',
+        prompt,
+        n: 1,
+        size: '1024x1024'
+      }).then(r => {
+        console.log('Image generated with gpt-image-2 ✅');
+        return r.data[0].url;
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Image generation timeout after 15s')), 15000))
+    ]).catch(e => {
+      console.log('Image generation skipped:', e.message);
+      return null; // fail gracefully — share continues without image
     });
-    const imageTempUrl = imgResp.data[0].url;
-    console.log('Image generated with gpt-image-2:', !!imageTempUrl);
 
     // Store image permanently in GitHub Pages (avoids URL expiry)
     const https = require('https');
