@@ -1027,7 +1027,10 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
       await ghPush(`og/${recipeId}.html`, Buffer.from(html).toString('base64'), `feat: OG page for recipe ${recipeId} — ${r.recipe_name}`);
     }
 
-    res.json({ pageUrl: ogUrl });
+    // Check if this is a new file or existing
+    const [existing] = await db.execute('SELECT image_url FROM recipe_history WHERE id = ? AND image_url IS NOT NULL', [recipeId]);
+    const wasNew = !existing.length;
+    res.json({ pageUrl: ogUrl, wasNew });
   } catch(e) {
     console.error('OG page error:', e.message);
     res.json({ pageUrl: `https://mealwheeliq.com/recipe.html?id=${recipeId}` });
