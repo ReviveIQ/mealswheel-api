@@ -864,59 +864,29 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
       await db.execute('UPDATE recipe_history SET image_url = NULL WHERE id = ?', [recipeId]);
     }
 
-    // Keyword-based food image fallback — curated Pexels CDN URLs, always work
+    // Use Unsplash immediately for the share card (fast, reliable)
+    // Then generate AI image in background and update the OG page
     if (!finalImgUrl) {
-      const kw = r.recipe_name.toLowerCase();
-      const imgMap = [
-        ['chicken', 'https://images.pexels.com/photos/2338407/pexels-photo-2338407.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['steak', 'https://images.pexels.com/photos/1639557/pexels-photo-1639557.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['beef', 'https://images.pexels.com/photos/1639557/pexels-photo-1639557.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['pork', 'https://images.pexels.com/photos/323682/pexels-photo-323682.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['salmon', 'https://images.pexels.com/photos/3296279/pexels-photo-3296279.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['fish', 'https://images.pexels.com/photos/3296279/pexels-photo-3296279.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['shrimp', 'https://images.pexels.com/photos/3296279/pexels-photo-3296279.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['pasta', 'https://images.pexels.com/photos/1279330/pexels-photo-1279330.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['soup', 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['salad', 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['turkey', 'https://images.pexels.com/photos/2338407/pexels-photo-2338407.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['ribeye', 'https://images.pexels.com/photos/1639557/pexels-photo-1639557.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['taco', 'https://images.pexels.com/photos/2087748/pexels-photo-2087748.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-        ['bowl', 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
-      ];
-      for (const [key, url] of imgMap) {
-        if (kw.includes(key)) { finalImgUrl = url; break; }
-      }
-      // Default food photo
-      if (!finalImgUrl) finalImgUrl = 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop';
-      await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [finalImgUrl, recipeId]);
-      console.log('Keyword image set:', finalImgUrl.slice(0, 80));
+      try {
+        const searchQuery = encodeURIComponent(r.recipe_name.split(' ').slice(0,3).join(' ') + ' food');
+        const unsplashUrl = `https://source.unsplash.com/1200x630/?${searchQuery}`;
+        const resolvedUrl = await new Promise((resolve) => {
+          https.get(unsplashUrl, { headers: { 'User-Agent': 'MealWheelIQ/1.0' } }, res => {
+            resolve(res.headers.location || (res.statusCode === 200 ? unsplashUrl : null));
+            res.destroy();
+          }).on('error', () => resolve(null));
+        });
+        if (resolvedUrl) {
+          finalImgUrl = resolvedUrl;
+          await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [finalImgUrl, recipeId]);
+          console.log('Unsplash image set:', finalImgUrl.slice(0,80));
+        }
+      } catch(e) { console.log('Unsplash failed:', e.message); }
     }
 
-    // Generate AI image in background — updates OG page once ready (no timeout block)
-    if (process.env.OPENAI_API_KEY) {
-      setImmediate(async () => {
-        try {
-          console.log('Background: generating gpt-image-1 for recipe', recipeId);
-          const OpenAI = require('openai');
-          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-          const prompt = `Professional food photography of ${r.recipe_name}. Overhead shot, rustic wooden table, natural lighting, beautifully plated, appetizing. No text, photorealistic.`;
-          const imgResp = await openai.images.generate({ model: 'gpt-image-1', prompt, n: 1, size: '1024x1024' });
-          const b64 = imgResp.data[0].b64_json;
-          if (b64) {
-            await ghPush(`og/img/${recipeId}.png`, b64, `img: recipe ${recipeId} AI food photo`);
-            const aiImgUrl = `https://mealwheeliq.com/og/img/${recipeId}.png`;
-            await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [aiImgUrl, recipeId]);
-            console.log('Background: gpt-image-1 stored:', aiImgUrl);
-            // Re-push OG page with AI image
-            const updatedHtml = html.replace(finalImgUrl, aiImgUrl).replace(finalImgUrl, aiImgUrl);
-            await ghPush(`og/${recipeId}.html`, Buffer.from(updatedHtml).toString('base64'), `img: update OG page with AI photo for recipe ${recipeId}`);
-            console.log('Background: OG page updated with AI image');
-          }
-        } catch(e) {
-          console.log('Background image gen skipped:', e.message);
-        }
-      });
-    }
+    if (!finalImgUrl) finalImgUrl = 'https://mealwheeliq.com/icons/icon-512.png';
+
+    // AI background image generation removed — using Pexels keyword images instead
 
     // Build OG HTML with permanent image URL
     const html = `<!DOCTYPE html>
@@ -1060,18 +1030,6 @@ app.post('/admin/upgrade', adminAuth, async (req, res) => {
       plan,
       message: `${users[0].email} upgraded to ${plan}`
     });
-  } catch(e) {
-    res.status(500).json({ error: e.message });
-  }
-});
-
-// POST /admin/clear-images — clear bad image URLs so Unsplash refetches
-app.post('/admin/clear-images', adminAuth, async (req, res) => {
-  try {
-    const [r1] = await db.execute("UPDATE recipe_history SET image_url = NULL WHERE image_url LIKE '%og/img/%'");
-    const [r2] = await db.execute("UPDATE recipe_history SET image_url = NULL WHERE image_url LIKE '%oaidalleapiprodscus%'");
-    const [r3] = await db.execute("UPDATE recipe_history SET image_url = NULL WHERE image_url = 'https://mealwheeliq.com/icons/icon-512.png'");
-    res.json({ cleared: r1.affectedRows + r2.affectedRows + r3.affectedRows, message: 'Bad image URLs cleared — next share will fetch Unsplash' });
   } catch(e) {
     res.status(500).json({ error: e.message });
   }
