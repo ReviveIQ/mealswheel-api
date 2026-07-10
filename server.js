@@ -1035,6 +1035,19 @@ app.post('/admin/upgrade', adminAuth, async (req, res) => {
   }
 });
 
+// GET /admin/clear-images — clear bad cached image URLs from DB
+app.get('/admin/clear-images', adminAuth, async (req, res) => {
+  try {
+    const [r1] = await db.execute("UPDATE recipe_history SET image_url = NULL WHERE image_url LIKE '%og/img/%'");
+    const [r2] = await db.execute("UPDATE recipe_history SET image_url = NULL WHERE image_url LIKE '%oaidalleapiprodscus%'");
+    const [r3] = await db.execute("UPDATE recipe_history SET image_url = NULL WHERE image_url = 'https://mealwheeliq.com/icons/icon-512.png'");
+    const total = r1.affectedRows + r2.affectedRows + r3.affectedRows;
+    res.json({ cleared: total, message: `${total} bad image URLs cleared — next share will fetch Pexels image` });
+  } catch(e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // GET /admin/users — list recent users
 app.get('/admin/users', adminAuth, async (req, res) => {
   try {
