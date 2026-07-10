@@ -864,27 +864,33 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
       await db.execute('UPDATE recipe_history SET image_url = NULL WHERE id = ?', [recipeId]);
     }
 
-    // Use Unsplash immediately for the share card (fast, reliable)
-    // Then generate AI image in background and update the OG page
+    // Keyword-based food image fallback — curated Pexels CDN URLs, always work
     if (!finalImgUrl) {
-      try {
-        const searchQuery = encodeURIComponent(r.recipe_name.split(' ').slice(0,3).join(' ') + ' food');
-        const unsplashUrl = `https://source.unsplash.com/1200x630/?${searchQuery}`;
-        const resolvedUrl = await new Promise((resolve) => {
-          https.get(unsplashUrl, { headers: { 'User-Agent': 'MealWheelIQ/1.0' } }, res => {
-            resolve(res.headers.location || (res.statusCode === 200 ? unsplashUrl : null));
-            res.destroy();
-          }).on('error', () => resolve(null));
-        });
-        if (resolvedUrl) {
-          finalImgUrl = resolvedUrl;
-          await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [finalImgUrl, recipeId]);
-          console.log('Unsplash image set:', finalImgUrl.slice(0,80));
-        }
-      } catch(e) { console.log('Unsplash failed:', e.message); }
+      const kw = r.recipe_name.toLowerCase();
+      const imgMap = [
+        ['chicken', 'https://images.pexels.com/photos/2338407/pexels-photo-2338407.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['steak', 'https://images.pexels.com/photos/1639557/pexels-photo-1639557.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['beef', 'https://images.pexels.com/photos/1639557/pexels-photo-1639557.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['pork', 'https://images.pexels.com/photos/323682/pexels-photo-323682.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['salmon', 'https://images.pexels.com/photos/3296279/pexels-photo-3296279.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['fish', 'https://images.pexels.com/photos/3296279/pexels-photo-3296279.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['shrimp', 'https://images.pexels.com/photos/3296279/pexels-photo-3296279.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['pasta', 'https://images.pexels.com/photos/1279330/pexels-photo-1279330.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['soup', 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['salad', 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['turkey', 'https://images.pexels.com/photos/2338407/pexels-photo-2338407.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['ribeye', 'https://images.pexels.com/photos/1639557/pexels-photo-1639557.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['taco', 'https://images.pexels.com/photos/2087748/pexels-photo-2087748.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+        ['bowl', 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop'],
+      ];
+      for (const [key, url] of imgMap) {
+        if (kw.includes(key)) { finalImgUrl = url; break; }
+      }
+      // Default food photo
+      if (!finalImgUrl) finalImgUrl = 'https://images.pexels.com/photos/1640777/pexels-photo-1640777.jpeg?auto=compress&cs=tinysrgb&w=1200&h=630&fit=crop';
+      await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [finalImgUrl, recipeId]);
+      console.log('Keyword image set:', finalImgUrl.slice(0, 80));
     }
-
-    if (!finalImgUrl) finalImgUrl = 'https://mealwheeliq.com/icons/icon-512.png';
 
     // Generate AI image in background — updates OG page once ready (no timeout block)
     if (process.env.OPENAI_API_KEY) {
