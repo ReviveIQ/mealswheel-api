@@ -848,41 +848,69 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
     const pageUrl = `https://mealwheeliq.com/recipe.html?id=${r.id}`;
     const ogUrl = `https://mealwheeliq.com/og/${recipeId}.html`;
 
-    // Check DB for cached image
+    // Check DB for cached image — skip bad URLs (expired or unservable)
     const [imgCache] = await db.execute('SELECT image_url FROM recipe_history WHERE id = ?', [recipeId]);
-    let finalImgUrl = imgCache[0]?.image_url || null;
-    console.log('Cached image:', finalImgUrl ? 'yes' : 'no');
+    const cachedUrl = imgCache[0]?.image_url || null;
+    const isBadCache = cachedUrl && (
+      cachedUrl.includes('mealwheeliq.com/og/img/') ||  // GitHub Pages PNG (too large)
+      cachedUrl.includes('oaidalleapiprodscus') ||        // expired OpenAI temp URL
+      cachedUrl === 'https://mealwheeliq.com/icons/icon-512.png' // fallback icon
+    );
+    let finalImgUrl = (cachedUrl && !isBadCache) ? cachedUrl : null;
+    console.log('Cached image:', finalImgUrl ? finalImgUrl.slice(0,60) : 'none/bad — fetching fresh');
+    
+    // Clear bad cache
+    if (isBadCache) {
+      await db.execute('UPDATE recipe_history SET image_url = NULL WHERE id = ?', [recipeId]);
+    }
 
-    // Get Unsplash food photo — resolve the redirect to get a stable CDN URL
+    // Use Unsplash immediately for the share card (fast, reliable)
+    // Then generate AI image in background and update the OG page
     if (!finalImgUrl) {
       try {
-        const searchQuery = encodeURIComponent(r.recipe_name.split(' ').slice(0,3).join(' ') + ' food photography');
+        const searchQuery = encodeURIComponent(r.recipe_name.split(' ').slice(0,3).join(' ') + ' food');
         const unsplashUrl = `https://source.unsplash.com/1200x630/?${searchQuery}`;
         const resolvedUrl = await new Promise((resolve) => {
           https.get(unsplashUrl, { headers: { 'User-Agent': 'MealWheelIQ/1.0' } }, res => {
-            // Follow up to 3 redirects to get the final stable CDN URL
-            const loc = res.headers.location;
-            if (loc && loc.includes('images.unsplash.com')) {
-              resolve(loc);
-            } else if (res.statusCode === 200) {
-              resolve(unsplashUrl);
-            } else {
-              resolve(null);
-            }
+            resolve(res.headers.location || (res.statusCode === 200 ? unsplashUrl : null));
             res.destroy();
           }).on('error', () => resolve(null));
         });
         if (resolvedUrl) {
           finalImgUrl = resolvedUrl;
           await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [finalImgUrl, recipeId]);
-          console.log('Unsplash image set:', finalImgUrl.slice(0, 80));
+          console.log('Unsplash image set:', finalImgUrl.slice(0,80));
         }
-      } catch(e) {
-        console.log('Unsplash failed:', e.message);
-      }
+      } catch(e) { console.log('Unsplash failed:', e.message); }
     }
 
     if (!finalImgUrl) finalImgUrl = 'https://mealwheeliq.com/icons/icon-512.png';
+
+    // Generate AI image in background — updates OG page once ready (no timeout block)
+    if (process.env.OPENAI_API_KEY) {
+      setImmediate(async () => {
+        try {
+          console.log('Background: generating gpt-image-1 for recipe', recipeId);
+          const OpenAI = require('openai');
+          const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+          const prompt = `Professional food photography of ${r.recipe_name}. Overhead shot, rustic wooden table, natural lighting, beautifully plated, appetizing. No text, photorealistic.`;
+          const imgResp = await openai.images.generate({ model: 'gpt-image-1', prompt, n: 1, size: '1024x1024' });
+          const b64 = imgResp.data[0].b64_json;
+          if (b64) {
+            await ghPush(`og/img/${recipeId}.png`, b64, `img: recipe ${recipeId} AI food photo`);
+            const aiImgUrl = `https://mealwheeliq.com/og/img/${recipeId}.png`;
+            await db.execute('UPDATE recipe_history SET image_url = ? WHERE id = ?', [aiImgUrl, recipeId]);
+            console.log('Background: gpt-image-1 stored:', aiImgUrl);
+            // Re-push OG page with AI image
+            const updatedHtml = html.replace(finalImgUrl, aiImgUrl).replace(finalImgUrl, aiImgUrl);
+            await ghPush(`og/${recipeId}.html`, Buffer.from(updatedHtml).toString('base64'), `img: update OG page with AI photo for recipe ${recipeId}`);
+            console.log('Background: OG page updated with AI image');
+          }
+        } catch(e) {
+          console.log('Background image gen skipped:', e.message);
+        }
+      });
+    }
 
     // Build OG HTML with permanent image URL
     const html = `<!DOCTYPE html>
