@@ -1057,6 +1057,54 @@ app.get('/recipe/:id', async (req, res) => {
   }
 });
 
+// ─── FACEBOOK DATA DELETION ──────────────────────────────────────────────────
+
+// POST /auth/facebook/delete — Facebook Data Deletion Callback
+// Required by Facebook Platform Policy for apps using Facebook Login
+// Facebook sends a signed_request when user removes the app or requests data deletion
+app.post('/auth/facebook/delete', async (req, res) => {
+  try {
+    const { signed_request } = req.body;
+    if (!signed_request) return res.status(400).json({ error: 'Missing signed_request' });
+
+    // Decode the signed request from Facebook
+    const [encodedSig, payload] = signed_request.split('.');
+    const data = JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
+    const userId = data.user_id;
+
+    console.log('Facebook deletion request for FB user:', userId);
+
+    // Find and delete the user by their Facebook-generated email pattern
+    // (we store fb users as fb_[userid]@mealwheeliq.com)
+    const fbEmail = `fb_${userId}@mealwheeliq.com`;
+    const [users] = await db.execute('SELECT id FROM users WHERE email = ?', [fbEmail]);
+
+    if (users.length) {
+      const mwiqUserId = users[0].id;
+      // Delete all user data
+      await db.execute('DELETE FROM recipe_history WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM user_preferences WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM user_pantry WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM subscriptions WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM spin_counts WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM favorite_recipes WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM meal_plans WHERE user_id = ?', [mwiqUserId]);
+      await db.execute('DELETE FROM users WHERE id = ?', [mwiqUserId]);
+      console.log('Deleted MealWheelIQ user:', mwiqUserId);
+    }
+
+    // Facebook requires a confirmation URL response
+    const confirmationCode = `delete_${userId}_${Date.now()}`;
+    res.json({
+      url: `https://mealwheeliq.com/deletion-status.html?id=${confirmationCode}`,
+      confirmation_code: confirmationCode
+    });
+  } catch(e) {
+    console.error('Facebook deletion error:', e);
+    res.status(500).json({ error: 'Deletion failed' });
+  }
+});
+
 // ─── ADMIN ───────────────────────────────────────────────────────────────────
 
 // Simple admin auth — checks for ADMIN_SECRET env var
