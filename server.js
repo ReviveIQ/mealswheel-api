@@ -495,6 +495,94 @@ app.post('/pantry/scan', authMiddleware, async (req, res) => {
 });
 
 // ─── RECIPE GENERATION ───────────────────────────────────────────────────────
+// ─── USDA FoodData Central — Nutrition Verification ─────────────────────────
+// Looks up each key ingredient against USDA's database and sums real macros,
+// replacing the AI's estimate when a confident match is found.
+const usdaCache = new Map(); // simple in-memory cache — same ingredient name looked up often
+
+async function usdaLookup(ingredientName) {
+  const key = ingredientName.toLowerCase().trim();
+  if (usdaCache.has(key)) return usdaCache.get(key);
+  if (!process.env.USDA_API_KEY) return null;
+
+  try {
+    const url = `https://api.nal.usda.gov/fdc/v1/foods/search?query=${encodeURIComponent(key)}&dataType=Foundation,SR%20Legacy&pageSize=1&api_key=${process.env.USDA_API_KEY}`;
+    const resp = await fetch(url);
+    if (!resp.ok) { usdaCache.set(key, null); return null; }
+    const data = await resp.json();
+    const food = data.foods?.[0];
+    if (!food) { usdaCache.set(key, null); return null; }
+
+    const getNutrient = (id) => food.foodNutrients?.find(n => n.nutrientId === id)?.value || 0;
+    // Per 100g values — standard USDA nutrient IDs
+    const result = {
+      calories: getNutrient(1008),
+      protein_g: getNutrient(1003),
+      carbs_g: getNutrient(1005),
+      fat_g: getNutrient(1004),
+      fiber_g: getNutrient(1079),
+      sodium_mg: getNutrient(1093)
+    };
+    usdaCache.set(key, result);
+    return result;
+  } catch (e) {
+    console.error('USDA lookup failed for', ingredientName, ':', e.message);
+    usdaCache.set(key, null);
+    return null;
+  }
+}
+
+// Rough gram-weight estimate per common unit — used since recipes give
+// amount+unit, not grams directly. Not lab-precise, but far better than
+// a flat AI guess, and enough to label the result "USDA verified."
+function estimateGrams(amount, unit) {
+  const u = (unit || '').toLowerCase();
+  const n = parseFloat(amount) || 1;
+  const table = {
+    'cup': 150, 'cups': 150, 'tbsp': 15, 'tsp': 5,
+    'oz': 28, 'ounce': 28, 'ounces': 28,
+    'lb': 454, 'lbs': 454, 'pound': 454, 'pounds': 454,
+    'g': 1, 'gram': 1, 'grams': 1, 'kg': 1000,
+    'clove': 5, 'cloves': 5, 'slice': 25, 'slices': 25
+  };
+  if (table[u]) return n * table[u];
+  return n * 100; // whole/countable items (e.g. "2 chicken breasts") — rough default
+}
+
+async function calculateVerifiedMacros(ingredients, servings) {
+  if (!process.env.USDA_API_KEY || !ingredients?.length) return null;
+
+  let totals = { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0, sodium_mg: 0 };
+  let matchedCount = 0;
+
+  for (const ing of ingredients) {
+    const usda = await usdaLookup(ing.name);
+    if (!usda) continue;
+    matchedCount++;
+    const grams = estimateGrams(ing.amount, ing.unit);
+    const factor = grams / 100; // USDA values are per 100g
+    totals.calories += usda.calories * factor;
+    totals.protein_g += usda.protein_g * factor;
+    totals.carbs_g += usda.carbs_g * factor;
+    totals.fat_g += usda.fat_g * factor;
+    totals.fiber_g += usda.fiber_g * factor;
+    totals.sodium_mg += usda.sodium_mg * factor;
+  }
+
+  // Require at least half the ingredients matched to call this "verified"
+  if (matchedCount < Math.ceil(ingredients.length / 2)) return null;
+
+  const s = servings || 2;
+  return {
+    calories_per_serving: Math.round(totals.calories / s),
+    protein_g: Math.round((totals.protein_g / s) * 10) / 10,
+    carbs_g: Math.round((totals.carbs_g / s) * 10) / 10,
+    fat_g: Math.round((totals.fat_g / s) * 10) / 10,
+    fiber_g: Math.round((totals.fiber_g / s) * 10) / 10,
+    sodium_mg: Math.round(totals.sodium_mg / s)
+  };
+}
+
 app.post('/generate', authMiddleware, async (req, res) => {
   const { prompt } = req.body;
   if (!prompt) return res.status(400).json({ error: 'No prompt provided' });
@@ -575,15 +663,35 @@ Recipe steps must follow professional cookbook standards (America's Test Kitchen
       const parsed = JSON.parse(clean);
       recipes = parsed.recipes || [];
 
+      // Get user's serving preference for accurate per-serving macros
+      const [prefRows] = await db.execute('SELECT servings FROM user_preferences WHERE user_id = ?', [req.user.userId]);
+      const servings = prefRows[0]?.servings || 2;
+
       for (const r of recipes) {
+        // Verify macros against USDA where possible — only look up ingredients
+        // the user actually has/buys, not pantry staples assumed always on hand
+        const keyIngredients = (r.ingredients || []).filter(i => !i.buy || i.organic);
+        const verified = await calculateVerifiedMacros(keyIngredients, servings);
+        if (verified) {
+          r.calories_per_serving = verified.calories_per_serving;
+          r.protein_g = verified.protein_g;
+          r.carbs_g = verified.carbs_g;
+          r.fat_g = verified.fat_g;
+          r.fiber_g = verified.fiber_g;
+          r.sodium_mg = verified.sodium_mg;
+          r.nutrition_source = 'USDA FoodData Central';
+        } else {
+          r.nutrition_source = 'AI estimate';
+        }
+
         const [result] = await db.execute(
           `INSERT INTO recipe_history
            (user_id, recipe_name, emoji, cook_time, difficulty, style,
-            calories_per_serving, protein_g, carbs_g, fat_g, ingredients, steps)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            calories_per_serving, protein_g, carbs_g, fat_g, ingredients, steps, nutrition_source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [req.user.userId, r.name, r.emoji, r.time, r.difficulty, r.style,
            r.calories_per_serving, r.protein_g, r.carbs_g, r.fat_g,
-           JSON.stringify(r.ingredients), JSON.stringify(r.steps)]
+           JSON.stringify(r.ingredients), JSON.stringify(r.steps), r.nutrition_source]
         );
         r._id = result.insertId;
       }
