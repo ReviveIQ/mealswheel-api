@@ -736,6 +736,14 @@ Recipe steps must follow professional cookbook standards (America's Test Kitchen
           r.nutrition_source = 'USDA FoodData Central';
         } else {
           r.nutrition_source = 'AI estimate';
+          // Don't trust the AI's own calorie math — recompute it directly
+          // from its protein/carb/fat grams so the numbers are at least
+          // internally consistent, even if the underlying estimate is rough.
+          const p = parseFloat(r.protein_g) || 0;
+          const c = parseFloat(r.carbs_g) || 0;
+          const f = parseFloat(r.fat_g) || 0;
+          const recalculated = Math.round((p * 4) + (c * 4) + (f * 9));
+          if (recalculated > 0) r.calories_per_serving = recalculated;
         }
 
         const [result] = await db.execute(
