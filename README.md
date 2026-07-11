@@ -1,4 +1,4 @@
-# mealswheel-api
+# mealwheeliq-api
 
 Express.js backend for MealWheelIQ — deployed on Railway at `api.mealwheeliq.com`.
 
