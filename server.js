@@ -558,10 +558,18 @@ async function calculateVerifiedMacros(ingredients, servings) {
   for (const ing of ingredients) {
     const usda = await usdaLookup(ing.name);
     if (!usda) continue;
-    matchedCount++;
     const grams = estimateGrams(ing.amount, ing.unit);
     const factor = grams / 100; // USDA values are per 100g
-    totals.calories += usda.calories * factor;
+    const ingCalories = usda.calories * factor;
+
+    // Reject a single ingredient contributing an implausible amount —
+    // e.g. "5 cloves garlic" mismatched to a concentrated/dehydrated
+    // product. A realistic single ingredient rarely exceeds ~900 kcal
+    // in a home-portion amount; if it does, treat as a bad match.
+    if (ingCalories > 900) continue;
+
+    matchedCount++;
+    totals.calories += ingCalories;
     totals.protein_g += usda.protein_g * factor;
     totals.carbs_g += usda.carbs_g * factor;
     totals.fat_g += usda.fat_g * factor;
@@ -677,9 +685,23 @@ Recipe steps must follow professional cookbook standards (America's Test Kitchen
         // out of line with the AI's own estimate, trust the AI estimate instead
         // of shipping a falsely "verified" but wrong number.
         const aiEstimate = parseFloat(r.calories_per_serving) || 0;
-        const plausible = verified && aiEstimate > 0
-          ? (verified.calories_per_serving / aiEstimate) > 0.4 && (verified.calories_per_serving / aiEstimate) < 2.5
-          : !!verified;
+        // Two independent checks — both must pass:
+        // 1) Verified total isn't wildly off from the AI's own ballpark estimate
+        // 2) The macros are internally consistent: protein(4) + carbs(4) + fat(9)
+        //    should roughly equal calories_per_serving. A bad ingredient match
+        //    (e.g. garlic matched to a concentrated dehydrated product) tends to
+        //    blow up carbs/fiber without the calorie total following — this catches
+        //    exactly that pattern even when the total calories look reasonable.
+        let plausible = false;
+        if (verified) {
+          const ratio = aiEstimate > 0 ? verified.calories_per_serving / aiEstimate : 1;
+          const ratioOk = aiEstimate === 0 || (ratio > 0.5 && ratio < 2.0);
+          const macroCalories = (verified.protein_g * 4) + (verified.carbs_g * 4) + (verified.fat_g * 9);
+          const macroConsistent = verified.calories_per_serving === 0
+            ? false
+            : Math.abs(macroCalories - verified.calories_per_serving) / verified.calories_per_serving < 0.35;
+          plausible = ratioOk && macroConsistent;
+        }
         if (verified && plausible) {
           r.calories_per_serving = verified.calories_per_serving;
           r.protein_g = verified.protein_g;
