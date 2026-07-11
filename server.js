@@ -297,7 +297,7 @@ app.post('/auth/signup', async (req, res) => {
     if (resend) {
       resend.emails.send({
         from: process.env.RESEND_FROM || 'onboarding@resend.dev',
-        to: 'chef@mealwheeliq.com',
+        to: 'bryan.greer1@gmail.com',
         subject: '🎉 New MealWheelIQ signup',
         text: `New user signed up.\n\nEmail: ${email}\nMethod: Email/Password\nUser ID: ${userId}\nTime: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`
       }).catch(e => console.error('Signup notify email failed:', e.message));
@@ -343,7 +343,7 @@ app.post('/auth/facebook', async (req, res) => {
       if (resend) {
         resend.emails.send({
           from: process.env.RESEND_FROM || 'onboarding@resend.dev',
-          to: 'chef@mealwheeliq.com',
+          to: 'bryan.greer1@gmail.com',
           subject: '🎉 New MealWheelIQ signup',
           text: `New user signed up.\n\nEmail: ${userEmail}\nName: ${userName}\nMethod: Facebook Login\nUser ID: ${userId}\nTime: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`
         }).catch(e => console.error('Signup notify email failed:', e.message));
@@ -1335,7 +1335,7 @@ app.get('/admin/test-signup-email', adminAuth, async (req, res) => {
   try {
     const result = await resend.emails.send({
       from: process.env.RESEND_FROM || 'onboarding@resend.dev',
-      to: 'chef@mealwheeliq.com',
+      to: 'bryan.greer1@gmail.com',
       subject: '🎉 [TEST] New MealWheelIQ signup',
       text: `This is a test of the signup notification.\n\nfrom used: ${process.env.RESEND_FROM || 'onboarding@resend.dev'}\nTime: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}`
     });
