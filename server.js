@@ -529,12 +529,35 @@ async function usdaLookup(ingredientName) {
     }) || candidates[0];
 
     const getNutrient = (id) => food.foodNutrients?.find(n => n.nutrientId === id)?.value || 0;
-    // Per 100g values — standard USDA nutrient IDs
+
+    // Some USDA entries don't populate the standard kcal field (1008) —
+    // they report energy only via Atwater General (2047), Atwater Specific
+    // (2048), or kJ (1062). Missing this caused exactly the bug pattern seen
+    // in production: an ingredient contributing full protein/carb/fat grams
+    // but zero calories, dragging the total calorie count far below what the
+    // macros actually add up to. Fall through alternates before giving up.
+    let calories = getNutrient(1008);
+    if (!calories) calories = getNutrient(2047);
+    if (!calories) calories = getNutrient(2048);
+    if (!calories) {
+      const kj = getNutrient(1062);
+      if (kj) calories = kj / 4.184;
+    }
+    // Last resort: if USDA gave us protein/carb/fat but truly no energy value
+    // anywhere, derive calories from those instead of silently reporting 0 —
+    // 0 kcal alongside real macros is worse than a computed estimate.
+    const protein_g = getNutrient(1003);
+    const carbs_g = getNutrient(1005);
+    const fat_g = getNutrient(1004);
+    if (!calories && (protein_g || carbs_g || fat_g)) {
+      calories = (protein_g * 4) + (carbs_g * 4) + (fat_g * 9);
+    }
+
     const result = {
-      calories: getNutrient(1008),
-      protein_g: getNutrient(1003),
-      carbs_g: getNutrient(1005),
-      fat_g: getNutrient(1004),
+      calories,
+      protein_g,
+      carbs_g,
+      fat_g,
       fiber_g: getNutrient(1079),
       sodium_mg: getNutrient(1093)
     };
