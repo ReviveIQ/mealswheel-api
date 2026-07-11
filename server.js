@@ -592,7 +592,7 @@ async function calculateVerifiedMacros(ingredients, servings) {
 }
 
 app.post('/generate', authMiddleware, async (req, res) => {
-  const { prompt } = req.body;
+  const { prompt, dailyGoal } = req.body;
   if (!prompt) return res.status(400).json({ error: 'No prompt provided' });
 
   // Check spin limit for free users
@@ -701,6 +701,15 @@ Recipe steps must follow professional cookbook standards (America's Test Kitchen
             ? false
             : Math.abs(macroCalories - verified.calories_per_serving) / verified.calories_per_serving < 0.35;
           plausible = ratioOk && macroConsistent;
+        }
+        // Log (don't reject) when a verified recipe blows past the dinner
+        // budget — a legitimately high-calorie recipe is a valid outcome
+        // (the UI already flags this visually), not a sign of a bad match.
+        if (verified && plausible && dailyGoal) {
+          const dinnerTarget = Math.round(dailyGoal * 0.35);
+          if (verified.calories_per_serving > dinnerTarget * 1.8) {
+            console.log(`Recipe "${r.name}" is ${verified.calories_per_serving}kcal vs ~${dinnerTarget}kcal dinner target (${Math.round(dailyGoal)}kcal/day goal)`);
+          }
         }
         if (verified && plausible) {
           r.calories_per_serving = verified.calories_per_serving;
