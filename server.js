@@ -1567,6 +1567,35 @@ app.get('/admin/test-signup-email', adminAuth, async (req, res) => {
 });
 
 // GET /admin/users — list recent users
+// DELETE /admin/delete-users — bulk-delete users and all related data (cascades
+// across every table with a user_id reference). Accepts comma-separated IDs.
+app.delete('/admin/delete-users', adminAuth, async (req, res) => {
+  const idsParam = req.query.ids;
+  if (!idsParam) return res.status(400).json({ error: 'Provide ?ids=1,2,3' });
+  const ids = idsParam.split(',').map(s => parseInt(s.trim())).filter(Boolean);
+  if (!ids.length) return res.status(400).json({ error: 'No valid IDs provided' });
+
+  const placeholders = ids.map(() => '?').join(',');
+  const deleted = { requested: ids };
+  try {
+    await db.execute(`DELETE FROM meal_plan_items WHERE meal_plan_id IN (SELECT id FROM meal_plans WHERE user_id IN (${placeholders}))`, ids);
+    await db.execute(`DELETE FROM meal_plans WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM favorite_recipes WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM recipe_ratings WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM recipe_history WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM spin_counts WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM user_pantry WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM user_preferences WHERE user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM family_profiles WHERE owner_user_id IN (${placeholders})`, ids);
+    await db.execute(`DELETE FROM subscriptions WHERE user_id IN (${placeholders})`, ids);
+    const [result] = await db.execute(`DELETE FROM users WHERE id IN (${placeholders})`, ids);
+    deleted.usersDeleted = result.affectedRows;
+    res.json({ success: true, ...deleted });
+  } catch (e) {
+    res.status(500).json({ error: e.message, ...deleted });
+  }
+});
+
 app.get('/admin/users', adminAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
