@@ -1569,7 +1569,7 @@ app.get('/admin/test-signup-email', adminAuth, async (req, res) => {
 // GET /admin/users — list recent users
 // DELETE /admin/delete-users — bulk-delete users and all related data (cascades
 // across every table with a user_id reference). Accepts comma-separated IDs.
-app.delete('/admin/delete-users', adminAuth, async (req, res) => {
+app.get('/admin/delete-users', adminAuth, async (req, res) => {
   const idsParam = req.query.ids;
   if (!idsParam) return res.status(400).json({ error: 'Provide ?ids=1,2,3' });
   const ids = idsParam.split(',').map(s => parseInt(s.trim())).filter(Boolean);
