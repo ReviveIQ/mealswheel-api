@@ -1659,6 +1659,8 @@ app.get('/admin/clear-cookbook', adminAuth, async (req, res) => {
     const [recipeRows] = await db.execute('SELECT id FROM recipe_history WHERE user_id = ?', [userId]);
     const recipeIds = recipeRows.map(r => r.id);
 
+    const [planRows] = await db.execute('SELECT id FROM meal_plans WHERE user_id = ?', [userId]);
+
     if (recipeIds.length) {
       const placeholders = recipeIds.map(() => '?').join(',');
       await db.execute(`DELETE FROM meal_plan_items WHERE recipe_id IN (${placeholders})`, recipeIds);
@@ -1666,10 +1668,14 @@ app.get('/admin/clear-cookbook', adminAuth, async (req, res) => {
       await db.execute(`DELETE FROM three_day_plan WHERE recipe_id IN (${placeholders})`, recipeIds);
       await db.execute(`DELETE FROM recipe_ratings WHERE recipe_id IN (${placeholders})`, recipeIds);
     }
+    // Clear the weekly meal plans themselves too, not just the items —
+    // otherwise empty plan shells (week_start_date, no recipes) get left behind
+    await db.execute('DELETE FROM meal_plan_items WHERE meal_plan_id IN (SELECT id FROM meal_plans WHERE user_id = ?)', [userId]);
+    await db.execute('DELETE FROM meal_plans WHERE user_id = ?', [userId]);
     await db.execute('DELETE FROM recipe_history WHERE user_id = ?', [userId]);
     await db.execute('DELETE FROM spin_counts WHERE user_id = ?', [userId]);
 
-    res.json({ success: true, userId, recipesCleared: recipeIds.length });
+    res.json({ success: true, userId, recipesCleared: recipeIds.length, mealPlansCleared: planRows.length });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
