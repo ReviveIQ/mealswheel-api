@@ -1648,6 +1648,33 @@ app.get('/admin/delete-users', adminAuth, async (req, res) => {
   }
 });
 
+// GET /admin/clear-cookbook?userId=X — wipes one user's recipe history/cookbook
+// (and anything referencing those recipes) without touching their account,
+// subscription, or preferences.
+app.get('/admin/clear-cookbook', adminAuth, async (req, res) => {
+  const userId = parseInt(req.query.userId);
+  if (!userId) return res.status(400).json({ error: 'Provide ?userId=X' });
+
+  try {
+    const [recipeRows] = await db.execute('SELECT id FROM recipe_history WHERE user_id = ?', [userId]);
+    const recipeIds = recipeRows.map(r => r.id);
+
+    if (recipeIds.length) {
+      const placeholders = recipeIds.map(() => '?').join(',');
+      await db.execute(`DELETE FROM meal_plan_items WHERE recipe_id IN (${placeholders})`, recipeIds);
+      await db.execute(`DELETE FROM favorite_recipes WHERE recipe_id IN (${placeholders})`, recipeIds);
+      await db.execute(`DELETE FROM three_day_plan WHERE recipe_id IN (${placeholders})`, recipeIds);
+      await db.execute(`DELETE FROM recipe_ratings WHERE recipe_id IN (${placeholders})`, recipeIds);
+    }
+    await db.execute('DELETE FROM recipe_history WHERE user_id = ?', [userId]);
+    await db.execute('DELETE FROM spin_counts WHERE user_id = ?', [userId]);
+
+    res.json({ success: true, userId, recipesCleared: recipeIds.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin/users', adminAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(
