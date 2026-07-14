@@ -1059,7 +1059,10 @@ app.get('/threeday', authMiddleware, async (req, res) => {
      ORDER BY tdp.added_at ASC`,
     [req.user.userId]
   );
-  res.json(rows.map(r => ({ ...r, ingredients: JSON.parse(r.ingredients || '[]') })));
+  res.json(rows.map(r => ({
+    ...r,
+    ingredients: typeof r.ingredients === 'string' ? JSON.parse(r.ingredients || '[]') : (r.ingredients || [])
+  })));
 });
 
 app.post('/profiles', authMiddleware, async (req, res) => {
