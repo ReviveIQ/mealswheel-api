@@ -1718,6 +1718,38 @@ app.get('/admin/clear-cookbook', adminAuth, async (req, res) => {
 });
 
 // GET /admin/stats — usage summary: signups, spins, and other events over time
+// GET /admin/dashboard-data — full per-user usage breakdown, catalogued by
+// user ID and email, across every tracked event category.
+app.get('/admin/dashboard-data', adminAuth, async (req, res) => {
+  try {
+    const [rows] = await db.execute(`
+      SELECT
+        u.id,
+        u.email,
+        u.created_at,
+        s.plan,
+        s.is_promo,
+        s.status,
+        (SELECT COUNT(*) FROM recipe_history rh WHERE rh.user_id = u.id) AS cookbook_recipes,
+        (SELECT COUNT(*) FROM favorite_recipes fr WHERE fr.user_id = u.id) AS favorites_count,
+        (SELECT COUNT(*) FROM three_day_plan tdp WHERE tdp.user_id = u.id) AS three_day_plan_count,
+        (SELECT COUNT(*) FROM meal_plans mp WHERE mp.user_id = u.id) AS week_plans_count,
+        (SELECT COUNT(*) FROM user_events ue WHERE ue.user_id = u.id AND ue.event_type = 'spin') AS spins,
+        (SELECT COUNT(*) FROM user_events ue WHERE ue.user_id = u.id AND ue.event_type = 'soup_spin') AS soup_spins,
+        (SELECT COUNT(*) FROM user_events ue WHERE ue.user_id = u.id AND ue.event_type = 'week_spin') AS week_spins,
+        (SELECT COUNT(*) FROM user_events ue WHERE ue.user_id = u.id AND ue.event_type = 'pantry_scan') AS pantry_scans,
+        (SELECT COUNT(*) FROM user_events ue WHERE ue.user_id = u.id) AS total_events,
+        (SELECT MAX(ue.created_at) FROM user_events ue WHERE ue.user_id = u.id) AS last_active
+      FROM users u
+      LEFT JOIN subscriptions s ON s.user_id = u.id
+      ORDER BY u.created_at DESC
+    `);
+    res.json({ users: rows, count: rows.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin/stats', adminAuth, async (req, res) => {
   try {
     const [signupsToday] = await db.execute("SELECT COUNT(*) as c FROM users WHERE created_at >= CURDATE()");
