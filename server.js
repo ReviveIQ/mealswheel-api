@@ -51,9 +51,21 @@ async function connectDB() {
     ssl: { rejectUnauthorized: false, minVersion: 'TLSv1.2' },
     waitForConnections: true,
     connectionLimit: 10,
-    connectTimeout: 30000
+    connectTimeout: 30000,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 10000
   });
   console.log('Connected to TiDB — database:', process.env.TIDB_DATABASE);
+
+  // Keep TiDB Serverless awake — ping every 4 minutes to prevent cold start drops
+  setInterval(async () => {
+    try {
+      await db.execute('SELECT 1');
+    } catch(e) {
+      console.log('TiDB keepalive failed, reconnecting...', e.message);
+      try { await connectDB(); } catch(e2) { console.log('Reconnect failed:', e2.message); }
+    }
+  }, 4 * 60 * 1000); // every 4 minutes
 }
 
 // ─── CREATE TABLES ───────────────────────────────────────────────────────────
