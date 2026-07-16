@@ -3,6 +3,7 @@ const cors = require('cors');
 const mysql = require('mysql2/promise');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const stripeKey = process.env.STRIPE_SECRET_KEY;
 const stripe = stripeKey ? require('stripe')(stripeKey) : null;
 
@@ -203,6 +204,19 @@ async function createTables() {
       servings INT DEFAULT 2,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (owner_user_id) REFERENCES users(id)
+    )
+  `);
+
+  // Password reset tokens — expire after 1 hour, single-use
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS password_resets (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      token VARCHAR(64) NOT NULL UNIQUE,
+      expires_at TIMESTAMP NOT NULL,
+      used BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
     )
   `);
 
@@ -460,6 +474,72 @@ app.post('/auth/login', async (req, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// POST /auth/forgot-password — generates a reset token and emails a reset link.
+// Always returns a generic success message, even if the email isn't found,
+// so this endpoint can't be used to check which emails have accounts.
+app.post('/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email required' });
+
+  try {
+    const [users] = await db.execute('SELECT id FROM users WHERE email = ?', [email.toLowerCase()]);
+    if (users.length) {
+      const userId = users[0].id;
+      const token = crypto.randomBytes(32).toString('hex');
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await db.execute(
+        'INSERT INTO password_resets (user_id, token, expires_at) VALUES (?, ?, ?)',
+        [userId, token, expiresAt]
+      );
+
+      if (resend) {
+        const resetUrl = `https://mealwheeliq.com/reset-password.html?token=${token}`;
+        resend.emails.send({
+          from: process.env.RESEND_FROM || 'onboarding@resend.dev',
+          to: email,
+          subject: '🔑 Reset your MealWheelIQ password',
+          html: `<p>Someone requested a password reset for your MealWheelIQ account.</p>
+                 <p><a href="${resetUrl}">Click here to set a new password</a> — this link expires in 1 hour.</p>
+                 <p>If you didn't request this, you can safely ignore this email.</p>`
+        }).catch(e => console.error('Password reset email failed:', e.message));
+      }
+    }
+    // Generic response regardless of whether the email was found
+    res.json({ success: true, message: 'If that email has an account, a reset link has been sent.' });
+  } catch (e) {
+    console.error('Forgot password error:', e);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+// POST /auth/reset-password — validates the token and sets a new password
+app.post('/auth/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+  if (!token || !newPassword) return res.status(400).json({ error: 'Token and new password required' });
+  if (newPassword.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters' });
+
+  try {
+    const [resets] = await db.execute(
+      'SELECT * FROM password_resets WHERE token = ? AND used = FALSE AND expires_at > NOW()',
+      [token]
+    );
+    if (!resets.length) {
+      return res.status(400).json({ error: 'This reset link is invalid or has expired. Please request a new one.' });
+    }
+
+    const reset = resets[0];
+    const hash = await bcrypt.hash(newPassword, 12);
+    await db.execute('UPDATE users SET password_hash = ? WHERE id = ?', [hash, reset.user_id]);
+    await db.execute('UPDATE password_resets SET used = TRUE WHERE id = ?', [reset.id]);
+
+    res.json({ success: true, message: 'Password updated — you can now log in.' });
+  } catch (e) {
+    console.error('Reset password error:', e);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 
@@ -1822,7 +1902,6 @@ const { Resend } = (() => {
   try { return require('resend'); } catch(e) { return { Resend: null }; }
 })();
 const resend = Resend && process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
-const crypto = require('crypto');
 
 // In-memory store for quickspin sessions (no DB needed — expires after 24h)
 const quickspinSessions = new Map();
