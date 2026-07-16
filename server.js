@@ -1866,6 +1866,60 @@ app.get('/admin/clear-cookbook', adminAuth, async (req, res) => {
 // GET /admin/stats — usage summary: signups, spins, and other events over time
 // GET /admin/dashboard-data — full per-user usage breakdown, catalogued by
 // user ID and email, across every tracked event category.
+// GET /admin/send-reengagement-emails — reminds anyone who signed up but never
+// actually did anything (no spin, soup spin, week spin, or pantry scan) to
+// snap a photo of their fridge/pantry and give it a try. Safe to re-run —
+// tracks who's already been sent this so it never double-emails anyone.
+app.get('/admin/send-reengagement-emails', adminAuth, async (req, res) => {
+  if (!resend) return res.status(500).json({ error: 'Resend not configured' });
+
+  try {
+    const [users] = await db.execute(`
+      SELECT u.id, u.email
+      FROM users u
+      WHERE NOT EXISTS (
+        SELECT 1 FROM user_events ue
+        WHERE ue.user_id = u.id
+        AND ue.event_type IN ('spin', 'soup_spin', 'week_spin', 'pantry_scan')
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM user_events ue2
+        WHERE ue2.user_id = u.id
+        AND ue2.event_type = 'reengagement_email_sent'
+      )
+    `);
+
+    const sentTo = [];
+    for (const user of users) {
+      resend.emails.send({
+        from: process.env.RESEND_FROM || 'onboarding@resend.dev',
+        to: user.email,
+        subject: 'Your fridge is waiting 🧊',
+        text: `Hey there,
+
+Noticed you signed up for MealWheelIQ but haven't taken it for a spin yet — no worries, life gets busy. Here's the fastest way in:
+
+Grab your phone right now and snap a photo of your fridge, freezer, and pantry. Don't type anything in — just let the camera do the work.
+
+Then hit Spin. You'll get 4 real dinner recipes built from what you actually have, including a guaranteed healthy salad option.
+
+Takes about 30 seconds start to finish. Give it a shot tonight:
+mealwheeliq.com
+
+— Bryan
+Founder, MealWheelIQ`
+      }).catch(e => console.error('Reengagement email failed for', user.email, ':', e.message));
+
+      await logEvent(user.id, 'reengagement_email_sent', {});
+      sentTo.push(user.email);
+    }
+
+    res.json({ success: true, emailsSent: sentTo.length, recipients: sentTo });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin/dashboard-data', adminAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(`
