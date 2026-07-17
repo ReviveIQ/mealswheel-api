@@ -1426,12 +1426,13 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
 
   try {
     const [rows] = await db.execute(
-      'SELECT id, recipe_name, emoji, time, difficulty, style, calories_per_serving, protein_g, carbs_g, fat_g, ingredients FROM recipe_history WHERE id = ? AND user_id = ?',
+      'SELECT id, recipe_name, emoji, time, difficulty, style, calories_per_serving, protein_g, carbs_g, fat_g, ingredients, steps FROM recipe_history WHERE id = ? AND user_id = ?',
       [recipeId, req.user.userId]
     );
     if (!rows.length) return res.status(404).json({ error: 'Recipe not found' });
     const r = rows[0];
     const ings = typeof r.ingredients === 'string' ? JSON.parse(r.ingredients || '[]') : (r.ingredients || []);
+    const steps = typeof r.steps === 'string' ? JSON.parse(r.steps || '[]') : (r.steps || []);
     const top3 = ings.slice(0, 3).map(i => i.name).join(', ');
     const more = ings.length > 3 ? ` + ${ings.length - 3} more` : '';
 
@@ -1583,11 +1584,44 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
     }
 
     // Build OG HTML with permanent image URL
+    const isoDuration = (timeStr) => {
+      const mins = parseInt(timeStr) || 30;
+      return `PT${mins}M`;
+    };
+    const recipeSchema = {
+      '@context': 'https://schema.org/',
+      '@type': 'Recipe',
+      name: r.recipe_name,
+      image: [finalImgUrl],
+      description: desc,
+      recipeCuisine: r.style || undefined,
+      totalTime: isoDuration(r.time),
+      recipeYield: '1 serving',
+      nutrition: {
+        '@type': 'NutritionInformation',
+        calories: `${r.calories_per_serving} calories`,
+        proteinContent: `${r.protein_g}g`,
+        carbohydrateContent: `${r.carbs_g}g`,
+        fatContent: `${r.fat_g}g`
+      },
+      recipeIngredient: ings.map(i => `${i.quantity || ''} ${i.unit || ''} ${i.name}`.trim()),
+      recipeInstructions: steps.map((s, idx) => ({ '@type': 'HowToStep', position: idx + 1, text: s })),
+      author: { '@type': 'Organization', name: 'MealWheelIQ' },
+      publisher: { '@type': 'Organization', name: 'MealWheelIQ', url: 'https://mealwheeliq.com' }
+    };
+
+    const ingredientListHtml = ings.map(i =>
+      `<li>${i.quantity || ''} ${i.unit || ''} ${i.name}</li>`
+    ).join('');
+    const stepsListHtml = steps.map(s => `<li>${s}</li>`).join('');
+
     const html = `<!DOCTYPE html>
 <html prefix="og: http://ogp.me/ns#">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${title}</title>
+  <meta name="description" content="${desc}">
   <meta property="og:title" content="${title}">
   <meta property="og:description" content="${desc}">
   <meta property="og:image" content="${finalImgUrl}">
@@ -1604,16 +1638,26 @@ app.post('/recipe/:id/og-page', authMiddleware, async (req, res) => {
   <meta name="twitter:title" content="${title}">
   <meta name="twitter:description" content="${desc}">
   <meta name="twitter:image" content="${finalImgUrl}">
-  <link rel="canonical" href="${pageUrl}">
-  <!-- real users click the link below; no redirect so Facebook reads these OG tags -->
+  <link rel="canonical" href="${ogUrl}">
+  <script type="application/ld+json">${JSON.stringify(recipeSchema)}</script>
 </head>
-<body style="font-family:sans-serif;max-width:600px;margin:2rem auto;padding:1rem;text-align:center">
-  <h1>${r.recipe_name}</h1>
-  <p style="color:#666;margin:1rem 0">${desc}</p>
-  <a href="${pageUrl}" style="background:#C94B2A;color:white;padding:.75rem 2rem;border-radius:24px;text-decoration:none;font-weight:700;display:inline-block;margin-top:1rem">
-    View full recipe on MealWheelIQ →
-  </a>
-  <p style="color:#999;font-size:12px;margin-top:2rem">
+<body style="font-family:sans-serif;max-width:640px;margin:2rem auto;padding:1rem;color:#1C1714">
+  <h1 style="margin-bottom:.3rem">${r.emoji || '🍽️'} ${r.recipe_name}</h1>
+  <p style="color:#666;margin-bottom:1rem">${r.time || '30 min'} · ${r.difficulty || 'Easy'} · ${r.style || ''} · ${r.calories_per_serving} kcal per serving</p>
+  <img src="${finalImgUrl}" alt="${r.recipe_name}" style="width:100%;border-radius:12px;margin-bottom:1.5rem">
+
+  <h2 style="font-size:1.1rem;border-bottom:1px solid #E2D9CE;padding-bottom:.4rem">Ingredients</h2>
+  <ul style="line-height:1.8">${ingredientListHtml}</ul>
+
+  <h2 style="font-size:1.1rem;border-bottom:1px solid #E2D9CE;padding-bottom:.4rem;margin-top:1.5rem">Instructions</h2>
+  <ol style="line-height:1.9">${stepsListHtml}</ol>
+
+  <div style="text-align:center;margin-top:2rem">
+    <a href="https://mealwheeliq.com" style="background:#C94B2A;color:white;padding:.75rem 2rem;border-radius:24px;text-decoration:none;font-weight:700;display:inline-block">
+      Get your own AI dinner recipes free →
+    </a>
+  </div>
+  <p style="color:#999;font-size:12px;margin-top:2rem;text-align:center">
     <a href="https://mealwheeliq.com" style="color:#C94B2A">MealWheelIQ</a> — Spin it. Cook it. Love it.
   </p>
 </body>
@@ -1978,6 +2022,37 @@ Founder, MealWheelIQ`
     res.json({ success: true, emailsSent: sentTo.length, recipients: sentTo });
   } catch (e) {
     res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /sitemap-recipes.xml — public, no auth. Lists every recipe that has a
+// real OG page (image_url set means the page was actually built and pushed
+// to GitHub Pages). Referenced from the main sitemap.xml as a sitemap index
+// entry so search engines can discover individual recipes.
+app.get('/sitemap-recipes.xml', async (req, res) => {
+  try {
+    const [rows] = await db.execute(
+      `SELECT id, spun_at FROM recipe_history WHERE image_url IS NOT NULL AND image_url != '' ORDER BY id DESC LIMIT 5000`
+    );
+    const urls = rows.map(r => {
+      const lastmod = r.spun_at ? new Date(r.spun_at).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
+      return `  <url>
+    <loc>https://mealwheeliq.com/og/${r.id}.html</loc>
+    <lastmod>${lastmod}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.5</priority>
+  </url>`;
+    }).join('\n');
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${urls}
+</urlset>`;
+
+    res.set('Content-Type', 'application/xml');
+    res.send(xml);
+  } catch (e) {
+    res.status(500).send('Error generating sitemap');
   }
 });
 
