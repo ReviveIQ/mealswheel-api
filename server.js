@@ -813,7 +813,7 @@ async function calculateVerifiedMacros(ingredients, servings) {
   for (const ing of ingredients) {
     const usda = await usdaLookup(ing.name);
     if (!usda) continue;
-    const grams = estimateGrams(ing.amount, ing.unit);
+    const grams = estimateGrams(ing.quantity, ing.unit);
     const factor = grams / 100; // USDA values are per 100g
     const ingCalories = usda.calories * factor;
 
@@ -833,7 +833,10 @@ async function calculateVerifiedMacros(ingredients, servings) {
   }
 
   // Require at least half the ingredients matched to call this "verified"
-  if (matchedCount < Math.ceil(ingredients.length / 2)) return null;
+  if (matchedCount < Math.ceil(ingredients.length / 2)) {
+    console.log(`USDA verification skipped: only ${matchedCount}/${ingredients.length} ingredients matched`);
+    return null;
+  }
 
   const s = servings || 2;
   return {
@@ -956,6 +959,9 @@ Recipe steps must follow professional cookbook standards (America's Test Kitchen
             ? false
             : Math.abs(macroCalories - verified.calories_per_serving) / verified.calories_per_serving < 0.35;
           plausible = ratioOk && macroConsistent;
+          if (!plausible) {
+            console.log(`USDA verification rejected for "${r.name}": ratioOk=${ratioOk} (${verified.calories_per_serving}kcal verified vs ${aiEstimate}kcal AI estimate), macroConsistent=${macroConsistent} (macro-math=${Math.round(macroCalories)}kcal vs stated=${verified.calories_per_serving}kcal)`);
+          }
         }
         // Log (don't reject) when a verified recipe blows past the dinner
         // budget — a legitimately high-calorie recipe is a valid outcome
