@@ -251,6 +251,7 @@ async function createTables() {
 
   // ── Migrations — safe to run on every boot, errors mean column exists ────────
   const migrations = [
+    { sql: "ALTER TABLE users ADD COLUMN facebook_id VARCHAR(50) UNIQUE", name: 'facebook_id' },
     { sql: "ALTER TABLE user_preferences ADD COLUMN chef_name VARCHAR(50) DEFAULT 'Chef'", name: 'chef_name' },
     { sql: "ALTER TABLE recipe_history ADD COLUMN time VARCHAR(50)", name: 'time' },
     { sql: "ALTER TABLE recipe_history ADD COLUMN difficulty VARCHAR(50)", name: 'difficulty' },
@@ -467,16 +468,34 @@ app.post('/auth/facebook', async (req, res) => {
     const userEmail = email || fbVerify.email || `fb_${fbId}@mealwheeliq.com`;
     const userName = (name || fbVerify.name || 'Chef').split(' ')[0];
 
-    let [users] = await db.execute('SELECT * FROM users WHERE email = ?', [userEmail]);
+    // Look up by facebook_id FIRST — this is stable and always present,
+    // unlike email which Facebook may withhold if the user declines to
+    // re-share it (e.g. clicking "Not Now" on a reconnect prompt). Relying
+    // on email alone caused returning users without a shared email to get
+    // a brand-new duplicate account instead of their real one.
+    let [users] = await db.execute('SELECT * FROM users WHERE facebook_id = ?', [fbId]);
+
+    // Legacy fallback: accounts created before facebook_id existed. Only
+    // matches on a REAL shared email, never the synthetic fb_{id}@ placeholder.
+    if (!users.length && email) {
+      [users] = await db.execute('SELECT * FROM users WHERE email = ?', [userEmail]);
+    }
+
     let userId;
     if (users.length) {
       userId = users[0].id;
+      // Backfill facebook_id if this account predates the column, so every
+      // future login for this user is matched reliably regardless of
+      // whether email gets shared again
+      if (!users[0].facebook_id) {
+        await db.execute('UPDATE users SET facebook_id = ? WHERE id = ?', [fbId, userId]).catch(() => {});
+      }
       logEvent(userId, 'login', { method: 'facebook' });
     } else {
       const promoPlan = await getPromoPlan();
       const [result] = await db.execute(
-        'INSERT INTO users (email, password_hash) VALUES (?, ?)',
-        [userEmail, await bcrypt.hash(fbId + process.env.JWT_SECRET, 10)]
+        'INSERT INTO users (email, password_hash, facebook_id) VALUES (?, ?, ?)',
+        [userEmail, await bcrypt.hash(fbId + process.env.JWT_SECRET, 10), fbId]
       );
       userId = result.insertId;
       await db.execute(
