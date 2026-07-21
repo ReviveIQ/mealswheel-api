@@ -724,6 +724,44 @@ app.post('/pantry/scan', authMiddleware, async (req, res) => {
 
     logEvent(req.user.userId, 'pantry_scan', { itemsFound: items.length });
     res.json({ items });
+
+    // Fire-and-forget thank-you email with the scanned items + a share invite —
+    // never blocks or delays the actual scan response
+    if (resend && items.length > 0) {
+      (async () => {
+        try {
+          const [userRows] = await db.execute('SELECT email FROM users WHERE id = ?', [req.user.userId]);
+          if (!userRows.length) return;
+          const userEmail = userRows[0].email;
+          if (userEmail.startsWith('fb_')) return; // synthetic placeholder, not a real address
+
+          const itemsList = items.map(i => `• ${i}`).join('\n');
+          await resend.emails.send({
+            from: process.env.RESEND_FROM || 'onboarding@resend.dev',
+            to: userEmail,
+            subject: '📸 Your pantry scan is in!',
+            text: `Hey there,
+
+Nice — we just scanned your fridge/pantry and found ${items.length} item${items.length === 1 ? '' : 's'}:
+
+${itemsList}
+
+Ready to turn that into dinner? Head back to MealWheelIQ and hit Spin.
+
+One more thing — if MealWheelIQ has saved you from a "what's for dinner" standoff even once, a friend or family member would probably love it too. Share it with them:
+
+👉 mealwheeliq.com
+
+Thanks for using MealWheelIQ!
+Bryan
+Founder, MealWheelIQ`
+          });
+        } catch (e) {
+          console.error('Pantry scan thank-you email failed:', e.message);
+        }
+      })();
+    }
+    return;
   } catch (err) {
     console.error('Pantry scan error:', err);
     res.status(500).json({ error: 'Pantry scan failed' });
