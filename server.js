@@ -2231,6 +2231,48 @@ ${urls}
   }
 });
 
+// POST /admin/send-email — send a custom, one-off email to a specific user by ID
+app.post('/admin/send-email', adminAuth, async (req, res) => {
+  if (!resend) return res.status(500).json({ error: 'Resend not configured' });
+  const { userId, subject, message } = req.body;
+  if (!userId || !subject || !message) return res.status(400).json({ error: 'userId, subject, and message are all required' });
+
+  try {
+    const [rows] = await db.execute('SELECT email FROM users WHERE id = ?', [userId]);
+    if (!rows.length) return res.status(404).json({ error: 'User not found' });
+    const userEmail = rows[0].email;
+
+    const htmlMessage = message.split('\n').map(line => `<p style="font-size:15px;color:#1C1714;line-height:1.6;margin:0 0 12px">${line}</p>`).join('');
+
+    await resend.emails.send({
+      from: process.env.RESEND_FROM || 'chef@mealwheeliq.com',
+      to: userEmail,
+      subject,
+      html: `<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#FAF7F2;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif">
+<div style="max-width:600px;margin:0 auto;padding:32px 24px">
+  <div style="text-align:center;padding-bottom:24px">
+    <div style="font-family:Georgia,serif;font-size:26px;font-weight:700;color:#1C1714">MealWheel<span style="color:#C94B2A">IQ</span></div>
+  </div>
+  <div style="background:white;border:1px solid #E2D9CE;border-radius:16px;padding:28px">
+    ${htmlMessage}
+  </div>
+  <div style="text-align:center;font-size:12px;color:#8C7B72;padding-top:24px">
+    MealWheelIQ · <a href="https://mealwheeliq.com" style="color:#C94B2A">mealwheeliq.com</a>
+  </div>
+</div>
+</body></html>`,
+      text: message
+    });
+
+    logEvent(userId, 'admin_email_sent', { subject });
+    res.json({ success: true, sentTo: userEmail });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/admin/dashboard-data', adminAuth, async (req, res) => {
   try {
     const [rows] = await db.execute(`
