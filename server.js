@@ -677,50 +677,49 @@ app.post('/pantry', authMiddleware, async (req, res) => {
 });
 
 // ─── PANTRY PHOTO SCAN ───────────────────────────────────────────────────────
+// Shared helper — calls Claude's vision API to identify food items in a photo.
+// Used by both the authenticated /pantry/scan and the public pre-login
+// /quickscan/:token flow so the actual scanning logic only lives in one place.
+async function scanImageForItems(image, mediaType) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': process.env.ANTHROPIC_API_KEY,
+      'anthropic-version': '2023-06-01'
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 1024,
+      system: 'You are a kitchen inventory assistant. Identify food and ingredient items visible in the photo. Respond ONLY with valid JSON, no markdown, no prose.',
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: image } },
+          { type: 'text', text: 'Identify every distinct food/ingredient item visible in this photo (fridge, pantry, or freezer). Use common grocery names (e.g. "Chicken Breast" not "raw poultry"). Skip non-food items, packaging-only views, and items you cannot confidently identify. Respond ONLY with valid JSON: {"items":["Chicken Breast","Broccoli","Cheddar Cheese"]}' }
+        ]
+      }]
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error?.message || 'Vision API error');
+  const raw = data.content?.map(b => b.text || '').join('') || '{}';
+  const clean = raw.replace(/```json|```/g, '').trim();
+  try {
+    const parsed = JSON.parse(clean);
+    return parsed.items || [];
+  } catch(e) {
+    console.error('Scan parse error:', e.message);
+    return [];
+  }
+}
+
 app.post('/pantry/scan', authMiddleware, async (req, res) => {
   const { image, mediaType } = req.body; // base64 image data, e.g. image/jpeg
   if (!image) return res.status(400).json({ error: 'No image provided' });
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1024,
-        system: 'You are a kitchen inventory assistant. Identify food and ingredient items visible in the photo. Respond ONLY with valid JSON, no markdown, no prose.',
-        messages: [{
-          role: 'user',
-          content: [
-            {
-              type: 'image',
-              source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: image }
-            },
-            {
-              type: 'text',
-              text: 'Identify every distinct food/ingredient item visible in this photo (fridge, pantry, or freezer). Use common grocery names (e.g. "Chicken Breast" not "raw poultry"). Skip non-food items, packaging-only views, and items you cannot confidently identify. Respond ONLY with valid JSON: {"items":["Chicken Breast","Broccoli","Cheddar Cheese"]}'
-            }
-          ]
-        }]
-      })
-    });
-
-    const data = await response.json();
-    if (!response.ok) return res.status(response.status).json({ error: data.error?.message || 'Vision API error' });
-
-    const raw = data.content?.map(b => b.text || '').join('') || '{}';
-    const clean = raw.replace(/```json|```/g, '').trim();
-    let items = [];
-    try {
-      const parsed = JSON.parse(clean);
-      items = parsed.items || [];
-    } catch(e) {
-      console.error('Pantry scan parse error:', e.message);
-    }
+    const items = await scanImageForItems(image, mediaType);
 
     logEvent(req.user.userId, 'pantry_scan', { itemsFound: items.length });
     res.json({ items });
@@ -768,7 +767,66 @@ Founder, MealWheelIQ`
   }
 });
 
-// ─── RECIPE GENERATION ───────────────────────────────────────────────────────
+// ─── PRE-LOGIN SCAN FLOW ──────────────────────────────────────────────────────
+// Lets someone scan their fridge/pantry straight from an email link before
+// logging in. Token is generated at email-send time, tied to that specific
+// user_id, and expires naturally when the server restarts (same pattern as
+// quickspinSessions — this is meant to be used within minutes, not persisted
+// long-term).
+
+// POST /quickscan/:token — public, no auth. Analyzes the photo and stores
+// the result against the token so it can be claimed after login.
+app.post('/quickscan/:token', async (req, res) => {
+  const { token } = req.params;
+  const { image, mediaType } = req.body;
+  const pending = pendingScans.get(token);
+  if (!pending) return res.status(404).json({ error: 'This scan link has expired. Please request a new one.' });
+  if (!image) return res.status(400).json({ error: 'No image provided' });
+
+  try {
+    const items = await scanImageForItems(image, mediaType);
+    pending.items = items;
+    pendingScans.set(token, pending);
+    res.json({ items });
+  } catch (err) {
+    console.error('Quickscan error:', err);
+    res.status(500).json({ error: 'Scan failed. Please try again.' });
+  }
+});
+
+// GET /quickscan/:token — public, no auth. Lets the confirmation page check
+// current status (e.g. after a page refresh).
+app.get('/quickscan/:token', (req, res) => {
+  const pending = pendingScans.get(req.params.token);
+  if (!pending) return res.status(404).json({ error: 'This scan link has expired.' });
+  res.json({ items: pending.items || null });
+});
+
+// POST /quickscan/:token/apply — authenticated. Called right after a normal
+// login/signup when the login page detects a scanToken in the URL. Verifies
+// the token actually belongs to the now-logged-in user before applying —
+// prevents one person's scan link from being claimed by someone else's login.
+app.post('/quickscan/:token/apply', authMiddleware, async (req, res) => {
+  const pending = pendingScans.get(req.params.token);
+  if (!pending) return res.status(404).json({ error: 'This scan link has expired.' });
+  if (pending.userId !== req.user.userId) return res.status(403).json({ error: 'This scan link belongs to a different account.' });
+  if (!pending.items || !pending.items.length) return res.status(400).json({ error: 'No scanned items to apply yet.' });
+
+  try {
+    for (const item of pending.items) {
+      await db.execute(
+        'INSERT IGNORE INTO user_pantry (user_id, ingredient_name) VALUES (?, ?)',
+        [req.user.userId, item]
+      );
+    }
+    logEvent(req.user.userId, 'pantry_scan', { itemsFound: pending.items.length, source: 'email_prelogin' });
+    pendingScans.delete(req.params.token);
+    res.json({ success: true, itemsApplied: pending.items.length });
+  } catch (err) {
+    console.error('Quickscan apply error:', err);
+    res.status(500).json({ error: 'Could not save scanned items.' });
+  }
+});
 // ─── USDA FoodData Central — Nutrition Verification ─────────────────────────
 // Looks up each key ingredient against USDA's database and sums real macros,
 // replacing the AI's estimate when a confident match is found.
@@ -2068,6 +2126,12 @@ app.get('/admin/send-reengagement-emails', adminAuth, async (req, res) => {
     const sentTo = [];
     for (const user of users) {
       const bannerUrl = 'https://mealwheeliq.com/email-assets/family-wheel-banner.jpg';
+
+      // Generate a token for the pre-login scan flow, tied to this user
+      const scanToken = crypto.randomBytes(16).toString('hex');
+      pendingScans.set(scanToken, { userId: user.id, items: null, createdAt: Date.now() });
+      const scanUrl = `https://mealwheeliq.com/quick-scan.html?token=${scanToken}`;
+
       resend.emails.send({
         from: process.env.RESEND_FROM || 'onboarding@resend.dev',
         to: user.email,
@@ -2080,14 +2144,18 @@ app.get('/admin/send-reengagement-emails', adminAuth, async (req, res) => {
   <div style="padding:28px 24px 0">
     <p style="font-size:15px;color:#1C1714;line-height:1.6">Hey there,</p>
     <p style="font-size:15px;color:#1C1714;line-height:1.6">It's officially been a week since you signed up for MealWheelIQ, and your wheel is just sitting there. Untouched. Getting dusty. It has feelings too, probably.</p>
-    <p style="font-size:15px;color:#1C1714;line-height:1.6">Here's the deal: you don't need a plan, a grocery list, or even much motivation. Just:</p>
+    <p style="font-size:15px;color:#1C1714;line-height:1.6">Statistically speaking, you're probably reading this on your phone while standing in front of an open fridge right now, wondering what to make. We see you. No judgment.</p>
+    <div style="text-align:center;margin:24px 0">
+      <a href="${scanUrl}" style="background:#1C1714;color:white;text-decoration:none;border-radius:24px;padding:14px 32px;font-size:15px;font-weight:700;display:inline-block">📸 Snap a photo right now →</a>
+    </div>
+    <p style="font-size:14px;color:#8C7B72;line-height:1.6;text-align:center;margin-top:-14px">No login needed yet — just snap the photo. We'll save your results and you can log in right after to get your recipes.</p>
+    <p style="font-size:15px;color:#1C1714;line-height:1.6">Or, if you'd rather do the whole thing at once:</p>
     <ol style="font-size:15px;color:#1C1714;line-height:1.9;padding-left:20px">
       <li>Sign in</li>
       <li>Snap a photo of whatever's in your fridge (or don't — you can type it in too)</li>
       <li>Spin</li>
       <li>Get a real dinner idea in about 10 seconds</li>
     </ol>
-    <p style="font-size:15px;color:#1C1714;line-height:1.6">That's it. That's the whole app.</p>
     <div style="text-align:center;margin:28px 0">
       <a href="https://mealwheeliq.com/login.html" style="background:#C94B2A;color:white;text-decoration:none;border-radius:24px;padding:14px 32px;font-size:15px;font-weight:700;display:inline-block">👉 Sign in and spin</a>
     </div>
@@ -2100,7 +2168,12 @@ app.get('/admin/send-reengagement-emails', adminAuth, async (req, res) => {
 
 It's officially been a week since you signed up for MealWheelIQ, and your wheel is just sitting there. Untouched. Getting dusty. It has feelings too, probably.
 
-Here's the deal: you don't need a plan, a grocery list, or even much motivation. Just:
+Statistically speaking, you're probably reading this on your phone while standing in front of an open fridge right now, wondering what to make. We see you. No judgment.
+
+Snap a photo right now (no login needed yet): ${scanUrl}
+We'll save your results and you can log in right after to get your recipes.
+
+Or, if you'd rather do the whole thing at once:
 
 1. Sign in
 2. Snap a photo of whatever's in your fridge (or don't — you can type it in too)
@@ -2248,6 +2321,10 @@ const resend = Resend && process.env.RESEND_API_KEY ? new Resend(process.env.RES
 
 // In-memory store for quickspin sessions (no DB needed — expires after 24h)
 const quickspinSessions = new Map();
+// Pre-login pantry scan flow — lets someone scan their fridge straight from
+// an email link before logging in. Token created at email-send time, tied
+// to the intended user_id, results held here until claimed after login.
+const pendingScans = new Map();
 setInterval(() => {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const [k, v] of quickspinSessions) {
